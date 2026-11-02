@@ -1041,7 +1041,7 @@ function renderDirectVideoHtml(
         // ====================================================================
         const LOOKAHEAD_WINDOW_SEC = 110;
         const FAST_BURST_URLS = 12; // 2 audio (20s) + 10 video (20s) for fastest initial/seek start
-        const CRUISE_BATCH_URLS = 24; // 3 audio + 21 video (42s) for >3.5x continuous read-ahead
+        const CRUISE_BATCH_URLS = 14; // 2-3 audio + 11-12 video (~24s in ~6.8s = 3.5x speed, <10s Vercel Hobby limit)
         const WARM_TTL_MS = 210 * 1000;
 
         const warmedMap = new Map();
@@ -2132,7 +2132,7 @@ export function registerApiRoutes(app: Express): void {
 
       await Promise.race([
         Promise.allSettled(tasks),
-        new Promise((resolve) => setTimeout(resolve, 24000)),
+        new Promise((resolve) => setTimeout(resolve, 8200)),
       ]);
 
       res.status(200).json({
