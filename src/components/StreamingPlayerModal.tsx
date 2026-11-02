@@ -81,15 +81,15 @@ export const StreamingPlayerModal: React.FC = () => {
     };
   }, [watchRequest]);
 
-  // Pre-warm Canal 1 HLS stream in background while the user chooses a channel
+  // Pre-warm all channel mappings + Canal 1 HLS playlists/segments while the user chooses a channel
   useEffect(() => {
     if (!watchRequest || !prefetchedImdb) return;
-    const controller = new AbortController();
     const params = new URLSearchParams({
       type: watchRequest.mediaType === 'tv' ? 'tvshow' : 'movie',
       imdb: prefetchedImdb,
       tmdbId: String(watchRequest.id),
       channel: '1',
+      warm: '1',
     });
     if (watchRequest.mediaType === 'tv') {
       params.set('season', String(watchRequest.season || 1));
@@ -97,9 +97,8 @@ export const StreamingPlayerModal: React.FC = () => {
     }
     fetch(`/api/supercdn/stream?${params.toString()}`, {
       method: 'GET',
-      signal: controller.signal,
+      keepalive: true,
     }).catch(() => {});
-    return () => controller.abort();
   }, [watchRequest, prefetchedImdb]);
 
   // If the user clicked a channel before IMDb prefetch finished, finish resolving inside the fullscreen player
