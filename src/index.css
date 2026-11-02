@@ -1,35 +1,27 @@
 @import "tailwindcss";
-@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-sans: "Nunito Sans", system-ui, -apple-system, sans-serif;
   --font-display: "Plus Jakarta Sans", "Nunito Sans", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-
-  --color-obsidian: #080808;
-  --color-surface: #121212;
-  --color-surface-elevated: #191919;
-  --color-crimson: #E50914;
-  --color-crimson-bright: #FF253A;
-  --color-muted: #A1A1A1;
 }
 
 :root {
-  --brand-primary: #E50914;
-  --brand-highlight: #FF253A;
+  --brand-primary: #e50914;
+  --brand-highlight: #ff253a;
   color-scheme: dark;
 }
 
 html {
-  background-color: #080808;
-  color: #FFFFFF;
+  color: #fff;
   font-family: var(--font-sans);
   scroll-behavior: smooth;
+  background-color: #080808;
 }
 
 body {
+  color: #fff;
   background-color: #080808;
-  color: #FFFFFF;
   overflow-x: hidden;
 }
 
@@ -45,7 +37,6 @@ body {
   text-wrap: balance;
 }
 
-/* Hide scrollbars on horizontal carousels while preserving native touch/trackpad scrolling */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -55,7 +46,6 @@ body {
   scrollbar-width: none;
 }
 
-/* Subtle custom scrollbar for vertical viewport */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -76,11 +66,11 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   *,
-  *::before,
-  *::after {
+  ::before,
+  ::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
   }
 }

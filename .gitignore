@@ -1,6 +1,8 @@
 node_modules/
 build/
 dist/
+.vercel/
+bun.lock
 coverage/
 .DS_Store
 *.log

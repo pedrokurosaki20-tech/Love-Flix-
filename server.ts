@@ -1,11 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
-import type { Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-// @ts-expect-error Native Node.js / tsx ESM .ts import for local server runtime
-import { registerApiRoutes } from './api/index.ts';
+import { registerApiRoutes } from './server/registerApiRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,7 +29,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
