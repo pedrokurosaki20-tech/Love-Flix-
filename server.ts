@@ -4,6 +4,7 @@ import type { Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// @ts-expect-error Native Node.js / tsx ESM .ts import for local server runtime
 import { registerApiRoutes } from './api/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
