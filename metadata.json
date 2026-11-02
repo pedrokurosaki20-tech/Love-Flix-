@@ -1,0 +1,6 @@
+{
+  "name": "Love Flix",
+  "description": "Plataforma completa de streaming e descoberta cinematográfica com catálogo de filmes, séries, animes, doramas e documentários integrado em tempo real à TMDB.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
