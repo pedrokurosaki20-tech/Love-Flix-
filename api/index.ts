@@ -103,9 +103,23 @@ const MAX_MANIFEST_CACHE_ENTRIES = 60;
 
 const hlsSegmentCache = new Map<string, CachedHlsSegment>();
 let hlsSegmentCacheBytes = 0;
-const MAX_SEGMENT_CACHE_BYTES = 48 * 1024 * 1024; // 48 MB bounded server cache
-const SEGMENT_CACHE_TTL_MS = 90 * 1000; // 90 seconds
+const MAX_SEGMENT_CACHE_BYTES = 180 * 1024 * 1024; // 180 MB bounded server RAM cache
+const SEGMENT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const inFlightSegmentFetches = new Map<string, Promise<CachedHlsSegment | null>>();
+
+interface IndexedMediaPlaylist {
+  origin: string;
+  segments: string[];
+  lookaheadCount: number;
+  updatedAt: number;
+}
+
+const playlistSegmentsIndex = new Map<string, IndexedMediaPlaylist>();
+const segmentToPlaylistPos = new Map<string, { playlistKey: string; index: number }>();
+const MAX_INDEXED_PLAYLISTS = 80;
+const MAX_INDEXED_SEGMENT_POS = 30000;
+let activeBgWarmFetches = 0;
+const MAX_BG_WARM_CONCURRENCY = 28;
 
 function pruneManifestCache() {
   const now = Date.now();
@@ -306,6 +320,67 @@ async function fetchUpstreamWithRetry(
   throw lastError || new Error('Upstream fetch failed');
 }
 
+function indexMediaPlaylistSegments(
+  playlistKey: string,
+  manifestText: string,
+  manifestUrl: string,
+  origin: string
+): void {
+  if (!manifestText.includes('#EXTINF:')) return;
+
+  const lines = manifestText.split(/\r?\n/);
+  const segments: string[] = [];
+  let totalExtInfSec = 0;
+  let extInfCount = 0;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('#EXTINF:')) {
+      const durMatch = trimmed.match(/^#EXTINF:\s*([\d.]+)/);
+      if (durMatch?.[1]) {
+        const d = Number(durMatch[1]);
+        if (Number.isFinite(d) && d > 0) {
+          totalExtInfSec += d;
+          extInfCount += 1;
+        }
+      }
+      continue;
+    }
+    if (trimmed.startsWith('#')) continue;
+    try {
+      segments.push(new URL(trimmed, manifestUrl).toString());
+    } catch {
+      // ignore malformed URI
+    }
+  }
+
+  if (segments.length === 0) return;
+
+  const avgDur = extInfCount > 0 ? totalExtInfSec / extInfCount : 2;
+  // ~56s lookahead for 2s video segments (28 segments), ~50s for 10s audio segments (5 segments)
+  const lookaheadCount = avgDur >= 6 ? 5 : 28;
+
+  while (playlistSegmentsIndex.size >= MAX_INDEXED_PLAYLISTS) {
+    const oldestKey = playlistSegmentsIndex.keys().next().value;
+    if (!oldestKey) break;
+    playlistSegmentsIndex.delete(oldestKey);
+  }
+  playlistSegmentsIndex.set(playlistKey, {
+    origin,
+    segments,
+    lookaheadCount,
+    updatedAt: Date.now(),
+  });
+
+  if (segmentToPlaylistPos.size + segments.length > MAX_INDEXED_SEGMENT_POS) {
+    segmentToPlaylistPos.clear();
+  }
+  for (let idx = 0; idx < segments.length; idx++) {
+    segmentToPlaylistPos.set(`${origin}|${segments[idx]}`, { playlistKey, index: idx });
+  }
+}
+
 async function getOrFetchRewrittenManifest(
   targetUrl: string,
   origin: string
@@ -334,6 +409,8 @@ async function getOrFetchRewrittenManifest(
 
   const isVod = text.includes('#EXT-X-ENDLIST');
   const rewritten = rewriteHlsManifest(text, targetUrl, origin);
+
+  indexMediaPlaylistSegments(cacheKey, text, targetUrl, origin);
 
   pruneManifestCache();
   hlsManifestCache.set(cacheKey, {
@@ -377,7 +454,7 @@ async function getOrFetchCachedSegment(
           'User-Agent': BROWSER_USER_AGENT,
           Accept: '*/*',
         },
-        20000,
+        30000,
         2
       );
       if (!upstream.ok) return null;
@@ -401,6 +478,30 @@ async function getOrFetchCachedSegment(
   return flight;
 }
 
+function triggerServerReadAhead(targetUrl: string, origin: string): void {
+  const pos = segmentToPlaylistPos.get(`${origin}|${targetUrl}`);
+  if (!pos) return;
+  const pl = playlistSegmentsIndex.get(pos.playlistKey);
+  if (!pl) return;
+
+  // Use a focused 10-segment burst at the very beginning for fastest startup, then full lookahead
+  const dynamicLookahead =
+    pl.lookaheadCount <= 5 ? pl.lookaheadCount : pos.index < 6 ? 10 : 24;
+  const maxIdx = Math.min(pl.segments.length - 1, pos.index + dynamicLookahead);
+  for (let i = pos.index + 1; i <= maxIdx; i++) {
+    if (activeBgWarmFetches >= MAX_BG_WARM_CONCURRENCY) break;
+    const nextUrl = pl.segments[i];
+    const nextKey = `${origin}|${nextUrl}`;
+    if (getCachedSegment(nextKey) || inFlightSegmentFetches.has(nextKey)) {
+      continue;
+    }
+    activeBgWarmFetches += 1;
+    void getOrFetchCachedSegment(nextUrl, origin).finally(() => {
+      activeBgWarmFetches = Math.max(0, activeBgWarmFetches - 1);
+    });
+  }
+}
+
 async function warmInitialHlsStream(
   masterHlsUrl: string,
   origin: string,
@@ -410,7 +511,6 @@ async function warmInitialHlsStream(
     const master = await getOrFetchRewrittenManifest(masterHlsUrl, origin);
     if (!master) return;
 
-    // Fetch raw master to identify child playlists if master came from cache without rawText
     let rawMaster = master.rawText || '';
     if (!rawMaster) {
       const res = await fetchUpstreamWithRetry(
@@ -456,7 +556,7 @@ async function warmInitialHlsStream(
     }
 
     const chosenAudioUrl = ptAudioPlaylistUrl || fallbackAudioPlaylistUrl;
-    const [videoChild, audioChild] = await Promise.all([
+    await Promise.all([
       firstVideoVariantUrl
         ? getOrFetchRewrittenManifest(firstVideoVariantUrl, origin)
         : Promise.resolve(null),
@@ -465,25 +565,18 @@ async function warmInitialHlsStream(
         : Promise.resolve(null),
     ]);
 
+    // Fast-start initial burst: 2 audio (20s) + 10 video (20s) = 12 segments (~2 per CDN shard)
     const initialSegments: string[] = [];
-    if (videoChild?.rawText && firstVideoVariantUrl) {
-      const vSegs = videoChild.rawText
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => l && !l.startsWith('#'))
-        .slice(0, 6);
-      for (const s of vSegs) {
-        initialSegments.push(new URL(s, firstVideoVariantUrl).toString());
+    if (chosenAudioUrl) {
+      const audioIndexed = playlistSegmentsIndex.get(`${origin}|${chosenAudioUrl}`);
+      if (audioIndexed) {
+        initialSegments.push(...audioIndexed.segments.slice(0, 2));
       }
     }
-    if (audioChild?.rawText && chosenAudioUrl) {
-      const aSegs = audioChild.rawText
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => l && !l.startsWith('#'))
-        .slice(0, 2);
-      for (const s of aSegs) {
-        initialSegments.push(new URL(s, chosenAudioUrl).toString());
+    if (firstVideoVariantUrl) {
+      const videoIndexed = playlistSegmentsIndex.get(`${origin}|${firstVideoVariantUrl}`);
+      if (videoIndexed) {
+        initialSegments.push(...videoIndexed.segments.slice(0, 10));
       }
     }
 
@@ -494,10 +587,10 @@ async function warmInitialHlsStream(
     );
 
     if (awaitPlaylistsOnly) {
-      // Give serverless warm requests up to 1.8s head-start on initial segments without blocking UI
+      // Give serverless warm requests a 3.5s head-start on the 28 parallel segments
       await Promise.race([
         warmAllPromise,
-        new Promise((resolve) => setTimeout(resolve, 1800)),
+        new Promise((resolve) => setTimeout(resolve, 3500)),
       ]);
     } else {
       void warmAllPromise;
@@ -779,345 +872,397 @@ function renderDirectVideoHtml(
         });
       }
 
-      let hasStartedPlayback = false;
+      const MIN_START_BUFFER_SEC = 12;
+      const MIN_REBUFFER_SEC = 10;
+
+      let initialCushionDone = false;
+      let gatePaused = false;
+      let gateStartedAt = 0;
+      let userPaused = false;
+      let playPending = false;
+      let streamEnded = false;
       let waitingTimer = null;
+
+      const showSpinner = () => {
+        spinner.classList.remove('hidden');
+      };
 
       const hideSpinner = () => {
         if (waitingTimer) {
           clearTimeout(waitingTimer);
           waitingTimer = null;
         }
-        spinner.classList.add('hidden');
+        if (!gatePaused) {
+          spinner.classList.add('hidden');
+        }
       };
 
-      const scheduleSpinner = () => {
-        if (!hasStartedPlayback) {
-          spinner.classList.remove('hidden');
+      const getBufferedAhead = () => {
+        const ct = video.currentTime || 0;
+        const buf = video.buffered;
+        let bestAhead = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const start = buf.start(i);
+          const end = buf.end(i);
+          if (ct >= start - 0.85 && ct <= end + 0.15) {
+            bestAhead = Math.max(bestAhead, Math.max(0, end - Math.max(ct, start)));
+          }
+        }
+        return bestAhead;
+      };
+
+      const enterBufferGate = () => {
+        if (gatePaused || userPaused || video.ended || streamEnded) return;
+        gatePaused = true;
+        gateStartedAt = Date.now();
+        showSpinner();
+        if (!playPending && !video.paused) {
+          try {
+            video.pause();
+          } catch {}
+        }
+      };
+
+      const safePlay = () => {
+        if (playPending || userPaused || gatePaused) return;
+        playPending = true;
+        const p = video.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            playPending = false;
+            tapPlay.classList.remove('visible');
+            const ahead = getBufferedAhead();
+            if (!initialCushionDone && ahead < MIN_START_BUFFER_SEC && !streamEnded) {
+              enterBufferGate();
+            } else {
+              initialCushionDone = true;
+              hideSpinner();
+            }
+          }).catch((err) => {
+            playPending = false;
+            if (err && err.name === 'NotAllowedError') {
+              gatePaused = false;
+              spinner.classList.add('hidden');
+              tapPlay.classList.add('visible');
+            }
+          });
+        } else {
+          playPending = false;
+        }
+      };
+
+      const evaluateBufferGate = () => {
+        if (!gatePaused) return;
+        if (userPaused) {
+          gatePaused = false;
+          spinner.classList.add('hidden');
           return;
         }
-        if (waitingTimer) return;
-        waitingTimer = setTimeout(() => {
-          waitingTimer = null;
-          if (video.paused || video.readyState < 3) {
-            spinner.classList.remove('hidden');
-          }
-        }, 450);
-      };
+        const ahead = getBufferedAhead();
+        const waitedMs = Date.now() - gateStartedAt;
+        const targetSec = initialCushionDone ? MIN_REBUFFER_SEC : MIN_START_BUFFER_SEC;
+        const ready =
+          ahead >= targetSec ||
+          streamEnded ||
+          video.ended ||
+          (ahead >= 6 && waitedMs > 9500) ||
+          (ahead >= 3 && waitedMs > 16000);
 
-      video.addEventListener('playing', () => {
-        hasStartedPlayback = true;
-        hideSpinner();
-        tapPlay.classList.remove('visible');
-      });
-      video.addEventListener('canplay', hideSpinner);
-      video.addEventListener('loadeddata', hideSpinner);
-      video.addEventListener('waiting', scheduleSpinner);
-
-      const attemptAutoplay = () => {
-        const p = video.play();
-        if (p && typeof p.catch === 'function') {
-          p.catch(() => {
-            hideSpinner();
-            tapPlay.classList.add('visible');
-          });
+        if (ready) {
+          initialCushionDone = true;
+          gatePaused = false;
+          hideSpinner();
+          safePlay();
         }
       };
+
+      setInterval(evaluateBufferGate, 250);
+
+      video.addEventListener('pause', () => {
+        if (!gatePaused && !video.ended && !playPending) {
+          userPaused = true;
+          spinner.classList.add('hidden');
+        }
+      });
+
+      video.addEventListener('play', () => {
+        if (!gatePaused) {
+          userPaused = false;
+        }
+      });
+
+      video.addEventListener('playing', () => {
+        tapPlay.classList.remove('visible');
+        if (!gatePaused) {
+          hideSpinner();
+        }
+      });
+
+      video.addEventListener('progress', evaluateBufferGate);
+      video.addEventListener('canplaythrough', evaluateBufferGate);
+      video.addEventListener('ended', () => {
+        streamEnded = true;
+        gatePaused = false;
+        hideSpinner();
+      });
+
+      video.addEventListener('waiting', () => {
+        if (userPaused || video.ended || streamEnded) return;
+        const ahead = getBufferedAhead();
+        if (ahead < 1.5 && !playPending) {
+          enterBufferGate();
+          return;
+        }
+        if (!waitingTimer) {
+          waitingTimer = setTimeout(() => {
+            waitingTimer = null;
+            if (!video.paused && video.readyState < 3) {
+              showSpinner();
+            }
+          }, 400);
+        }
+      });
 
       tapPlay.addEventListener('click', () => {
         tapPlay.classList.remove('visible');
+        userPaused = false;
+        gatePaused = false;
         video.muted = false;
-        video.play().catch(() => {});
+        safePlay();
       });
 
       const isHlsSource = src.includes('.m3u8') || src.includes('/api/supercdn/hls-proxy');
 
       if (isHlsSource && window.Hls && window.Hls.isSupported()) {
         // ====================================================================
-        // Parallel Sliding-Window Segment Prefetch Engine
-        // Upstream shards 2s segments across 6+ domains with ~4s cold TTFB.
-        // Sequential loading stalls; 8-way parallel lookahead stays ~80s ahead.
+        // Server-Side 28-Way Parallel Batch Warmer + Clean Native Sequential HLS
+        // Eliminates browser 6-connection starvation & 4G saturation while
+        // keeping the Node/Cloudflare cache ~100s ahead at >4x real-time speed.
         // ====================================================================
-        const segCache = new Map();
-        let cachedBytes = 0;
-        const MAX_BROWSER_CACHE_BYTES = 56 * 1024 * 1024;
-        const PREFETCH_AHEAD_SEC = 90;
-        const MAX_VIDEO_IN_FLIGHT = 12;
-        const MAX_AUDIO_IN_FLIGHT = 3;
+        const LOOKAHEAD_WINDOW_SEC = 110;
+        const FAST_BURST_URLS = 12; // 2 audio (20s) + 10 video (20s) for fastest initial/seek start
+        const CRUISE_BATCH_URLS = 24; // 3 audio + 21 video (42s) for >3.5x continuous read-ahead
+        const WARM_TTL_MS = 210 * 1000;
 
+        const warmedMap = new Map();
+        let inFlightWarmCtrl = null;
+        let warmPendingImmediate = false;
+        let initialWarmTimer = null;
         let videoFrags = [];
         let audioFrags = [];
-        let activeVideoInFlight = 0;
-        let activeAudioInFlight = 0;
 
-        const normUrl = (raw) => {
+        const toProxyRelUrl = (rawUrl) => {
           try {
-            return new URL(raw, window.location.origin).href;
+            const u = new URL(rawUrl, window.location.origin);
+            if (!u.pathname.startsWith('/api/supercdn/hls-proxy')) return null;
+            return u.pathname + u.search;
           } catch {
-            return raw;
+            return null;
           }
         };
 
-        const evictOldSegments = (anchorSec) => {
-          for (const [k, entry] of segCache.entries()) {
-            if (entry.status === 'ready' && !entry.pinnedByHls && entry.mediaEnd < anchorSec - 12) {
-              cachedBytes -= entry.byteLength;
-              segCache.delete(k);
+        const pruneWarmedMap = () => {
+          const cutoff = Date.now() - WARM_TTL_MS;
+          for (const [k, ts] of warmedMap.entries()) {
+            if (ts < cutoff) warmedMap.delete(k);
+          }
+        };
+
+        const collectNextColdUrls = (anchorSec, urgentBurst) => {
+          pruneWarmedMap();
+          const maxTotal = urgentBurst ? FAST_BURST_URLS : CRUISE_BATCH_URLS;
+          const maxAudio = urgentBurst ? 2 : 3;
+          const windowEnd = anchorSec + (urgentBurst ? 24 : LOOKAHEAD_WINDOW_SEC);
+          const batch = [];
+          const seen = new Set();
+
+          for (let i = 0; i < audioFrags.length; i++) {
+            if (batch.length >= maxAudio) break;
+            const f = audioFrags[i];
+            const fStart = f.start || 0;
+            const fEnd = fStart + (f.duration || 10);
+            if (fEnd < anchorSec - 1) continue;
+            if (fStart > anchorSec + 50) break;
+            const rel = toProxyRelUrl(f.url);
+            if (rel && !warmedMap.has(rel) && !seen.has(rel)) {
+              seen.add(rel);
+              batch.push(rel);
             }
           }
-          while (cachedBytes > MAX_BROWSER_CACHE_BYTES) {
-            let victimKey = null;
-            for (const [k, entry] of segCache.entries()) {
-              if (entry.status === 'ready' && !entry.pinnedByHls) {
-                victimKey = k;
-                break;
+
+          for (let i = 0; i < videoFrags.length; i++) {
+            if (batch.length >= maxTotal) break;
+            const f = videoFrags[i];
+            const fStart = f.start || 0;
+            const fEnd = fStart + (f.duration || 2);
+            if (fEnd < anchorSec - 0.5) continue;
+            if (fStart > windowEnd) break;
+            const rel = toProxyRelUrl(f.url);
+            if (rel && !warmedMap.has(rel) && !seen.has(rel)) {
+              seen.add(rel);
+              batch.push(rel);
+            }
+          }
+
+          return batch;
+        };
+
+        const pumpServerWarm = (forceResetInFlight) => {
+          if (forceResetInFlight && inFlightWarmCtrl) {
+            inFlightWarmCtrl.abort();
+            inFlightWarmCtrl = null;
+          }
+          if (inFlightWarmCtrl) {
+            warmPendingImmediate = true;
+            return;
+          }
+
+          const anchor = video.currentTime || 0;
+          const isUrgent = !initialCushionDone || gatePaused || getBufferedAhead() < 14;
+          let batchUrls = collectNextColdUrls(anchor, isUrgent);
+          if (batchUrls.length === 0 && isUrgent) {
+            batchUrls = collectNextColdUrls(anchor, false);
+          }
+          if (batchUrls.length === 0) return;
+
+          const ctrl = new AbortController();
+          inFlightWarmCtrl = ctrl;
+          const sentAt = Date.now();
+          batchUrls.forEach((u) => warmedMap.set(u, sentAt));
+
+          fetch('/api/supercdn/hls-warm-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: batchUrls }),
+            signal: ctrl.signal,
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+              if (!data || !Array.isArray(data.warmed)) {
+                batchUrls.forEach((u) => warmedMap.delete(u));
+                return;
               }
-            }
-            if (!victimKey) break;
-            const victim = segCache.get(victimKey);
-            if (victim) cachedBytes -= victim.byteLength;
-            segCache.delete(victimKey);
-          }
-        };
-
-        const fetchArrayBufferWithRetry = async (url, signal) => {
-          let lastErr = null;
-          for (let attempt = 1; attempt <= 2; attempt++) {
-            const timeoutCtrl = new AbortController();
-            const timer = setTimeout(() => timeoutCtrl.abort(), 24000);
-            const onOuterAbort = () => timeoutCtrl.abort();
-            signal.addEventListener('abort', onOuterAbort, { once: true });
-            try {
-              const res = await fetch(url, { signal: timeoutCtrl.signal });
-              clearTimeout(timer);
-              signal.removeEventListener('abort', onOuterAbort);
-              if (res.ok) {
-                const buf = await res.arrayBuffer();
-                if (buf && buf.byteLength > 0) {
-                  return { url: res.url || url, data: buf };
+              const okSet = new Set(data.warmed);
+              const doneAt = Date.now();
+              batchUrls.forEach((u, idx) => {
+                if (okSet.has(idx)) {
+                  warmedMap.set(u, doneAt);
+                } else {
+                  warmedMap.delete(u);
                 }
-              }
-              lastErr = new Error('HTTP ' + res.status);
-            } catch (err) {
-              clearTimeout(timer);
-              signal.removeEventListener('abort', onOuterAbort);
-              lastErr = err;
-              if (signal.aborted) throw err;
-            }
-            if (attempt < 2 && !signal.aborted) {
-              await new Promise((r) => setTimeout(r, 220));
-            }
-          }
-          throw lastErr || new Error('Segment load failed');
-        };
-
-        const startSegmentLoad = (rawUrl, kind, mediaStart, mediaEnd, pinned) => {
-          const key = normUrl(rawUrl);
-          const existing = segCache.get(key);
-          if (existing) {
-            if (pinned) existing.pinnedByHls = true;
-            return existing;
-          }
-
-          const controller = new AbortController();
-          const t0 = performance.now();
-          if (kind === 'audio') activeAudioInFlight++;
-          else activeVideoInFlight++;
-
-          const entry = {
-            key,
-            kind,
-            status: 'loading',
-            data: null,
-            url: key,
-            byteLength: 0,
-            durationMs: 0,
-            mediaStart: mediaStart || 0,
-            mediaEnd: mediaEnd || 0,
-            pinnedByHls: Boolean(pinned),
-            controller,
-            promise: null,
-          };
-
-          entry.promise = fetchArrayBufferWithRetry(key, controller.signal)
-            .then((result) => {
-              entry.status = 'ready';
-              entry.data = result.data;
-              entry.url = result.url;
-              entry.byteLength = result.data.byteLength;
-              entry.durationMs = Math.max(25, performance.now() - t0);
-              cachedBytes += entry.byteLength;
-              evictOldSegments(video.currentTime || 0);
-              return entry;
+              });
             })
-            .catch((err) => {
-              segCache.delete(key);
-              throw err;
+            .catch(() => {
+              batchUrls.forEach((u) => warmedMap.delete(u));
             })
             .finally(() => {
-              if (kind === 'audio') activeAudioInFlight = Math.max(0, activeAudioInFlight - 1);
-              else activeVideoInFlight = Math.max(0, activeVideoInFlight - 1);
-              pumpPrefetch();
+              if (inFlightWarmCtrl === ctrl) {
+                inFlightWarmCtrl = null;
+              }
+              const remaining = collectNextColdUrls(video.currentTime || 0, false);
+              if (warmPendingImmediate || remaining.length >= 6) {
+                warmPendingImmediate = false;
+                setTimeout(() => pumpServerWarm(false), 60);
+              }
             });
-
-          segCache.set(key, entry);
-          return entry;
         };
 
-        const pumpPrefetch = () => {
-          const anchor = video.currentTime || 0;
-          const windowEnd = anchor + PREFETCH_AHEAD_SEC;
+        let initialPlaylistsReady = false;
 
-          if (videoFrags.length > 0 && activeVideoInFlight < MAX_VIDEO_IN_FLIGHT) {
-            for (let i = 0; i < videoFrags.length; i++) {
-              if (activeVideoInFlight >= MAX_VIDEO_IN_FLIGHT) break;
-              const f = videoFrags[i];
-              const fStart = f.start || 0;
-              const fEnd = fStart + (f.duration || 2);
-              if (fEnd < anchor - 0.5) continue;
-              if (fStart > windowEnd) break;
-              const key = normUrl(f.url);
-              if (!segCache.has(key)) {
-                startSegmentLoad(key, 'video', fStart, fEnd, false);
-              }
-            }
+        const scheduleInitialWarm = () => {
+          if (initialWarmTimer) clearTimeout(initialWarmTimer);
+          const hasAudioTracks = (hls.audioTracks || []).length > 0;
+          const bothReady = videoFrags.length > 0 && (!hasAudioTracks || audioFrags.length > 0);
+          if (bothReady) {
+            initialPlaylistsReady = true;
+            pumpServerWarm(false);
+            return;
           }
-
-          if (audioFrags.length > 0 && activeAudioInFlight < MAX_AUDIO_IN_FLIGHT) {
-            for (let i = 0; i < audioFrags.length; i++) {
-              if (activeAudioInFlight >= MAX_AUDIO_IN_FLIGHT) break;
-              const f = audioFrags[i];
-              const fStart = f.start || 0;
-              const fEnd = fStart + (f.duration || 10);
-              if (fEnd < anchor - 1) continue;
-              if (fStart > windowEnd) break;
-              const key = normUrl(f.url);
-              if (!segCache.has(key)) {
-                startSegmentLoad(key, 'audio', fStart, fEnd, false);
-              }
-            }
-          }
+          initialWarmTimer = setTimeout(() => {
+            initialWarmTimer = null;
+            initialPlaylistsReady = true;
+            pumpServerWarm(false);
+          }, 80);
         };
 
         video.addEventListener('seeking', () => {
-          const target = video.currentTime || 0;
-          for (const [k, entry] of segCache.entries()) {
-            if (
-              entry.status === 'loading' &&
-              !entry.pinnedByHls &&
-              (entry.mediaEnd < target - 2 || entry.mediaStart > target + PREFETCH_AHEAD_SEC)
-            ) {
-              entry.controller.abort();
-              segCache.delete(k);
-            }
+          streamEnded = false;
+          if (!userPaused && getBufferedAhead() < 2) {
+            enterBufferGate();
           }
-          evictOldSegments(target);
-          pumpPrefetch();
+          pumpServerWarm(true);
         });
 
-        let lastPumpTs = 0;
+        let lastWarmTick = 0;
         video.addEventListener('timeupdate', () => {
-          hideSpinner();
+          if (!gatePaused) hideSpinner();
           const now = Date.now();
-          if (now - lastPumpTs > 1500) {
-            lastPumpTs = now;
-            evictOldSegments(video.currentTime || 0);
-            pumpPrefetch();
+          if (now - lastWarmTick > 3500) {
+            lastWarmTick = now;
+            pumpServerWarm(false);
           }
         });
-
-        const BaseLoader = window.Hls.DefaultConfig.loader;
-        class ParallelPrefetchFragmentLoader extends BaseLoader {
-          constructor(config) {
-            super(config);
-            this._aborted = false;
-            this._activeEntry = null;
-          }
-          load(context, config, callbacks) {
-            if (
-              context &&
-              context.responseType === 'arraybuffer' &&
-              context.url &&
-              context.rangeStart === undefined &&
-              context.rangeEnd === undefined
-            ) {
-              const frag = context.frag;
-              const kind = frag && frag.type === 'audio' ? 'audio' : 'video';
-              const fStart = frag ? frag.start || 0 : 0;
-              const fEnd = fStart + (frag ? frag.duration || 2 : 2);
-              const entry = startSegmentLoad(context.url, kind, fStart, fEnd, true);
-              this._activeEntry = entry;
-              this.context = context;
-              this.config = config;
-              this.callbacks = callbacks;
-
-              entry.promise
-                .then((resolved) => {
-                  if (this._aborted || !this.callbacks) return;
-                  const now = performance.now();
-                  const effectiveMs = Math.max(35, Math.round((resolved.durationMs || 120) / 4));
-                  const stats = this.stats;
-                  stats.loading.start = Math.max(0.1, now - effectiveMs);
-                  stats.loading.first = stats.loading.start + Math.min(20, effectiveMs * 0.4);
-                  stats.loading.end = now;
-                  stats.loaded = resolved.byteLength;
-                  stats.total = resolved.byteLength;
-                  stats.chunkCount = 1;
-                  entry.pinnedByHls = false;
-                  this.callbacks.onSuccess(
-                    { url: resolved.url, data: resolved.data },
-                    stats,
-                    context,
-                    null
-                  );
-                })
-                .catch(() => {
-                  entry.pinnedByHls = false;
-                  if (this._aborted || !this.callbacks) return;
-                  this.stats.loading.start = 0;
-                  super.load(context, config, callbacks);
-                });
-              return;
-            }
-            super.load(context, config, callbacks);
-          }
-          abort() {
-            this._aborted = true;
-            if (this._activeEntry) {
-              this._activeEntry.pinnedByHls = false;
-            }
-            super.abort();
-          }
-          destroy() {
-            this._aborted = true;
-            if (this._activeEntry) {
-              this._activeEntry.pinnedByHls = false;
-            }
-            super.destroy();
-          }
-        }
 
         const hls = new window.Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          fLoader: ParallelPrefetchFragmentLoader,
           maxBufferLength: 90,
           maxMaxBufferLength: 180,
           backBufferLength: 30,
-          maxBufferSize: 90 * 1000 * 1000,
+          maxBufferSize: 120 * 1000 * 1000,
           maxBufferHole: 0.5,
           highBufferWatchdogPeriod: 2,
           nudgeOffset: 0.2,
           nudgeMaxRetry: 10,
           startFragPrefetch: true,
-          abrBandWidthFactor: 0.7,
-          abrBandWidthUpFactor: 0.55,
-          fragLoadingTimeOut: 25000,
-          fragLoadingMaxRetry: 6,
-          fragLoadingRetryDelay: 400,
-          manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 4,
-          levelLoadingTimeOut: 15000,
-          levelLoadingMaxRetry: 4,
+          fragLoadPolicy: {
+            default: {
+              maxTimeToFirstByteMs: 35000,
+              maxLoadTimeMs: 45000,
+              timeoutRetry: {
+                maxNumRetry: 6,
+                retryDelayMs: 500,
+                maxRetryDelayMs: 4000,
+              },
+              errorRetry: {
+                maxNumRetry: 6,
+                retryDelayMs: 500,
+                maxRetryDelayMs: 4000,
+              },
+            },
+          },
+          playlistLoadPolicy: {
+            default: {
+              maxTimeToFirstByteMs: 20000,
+              maxLoadTimeMs: 25000,
+              timeoutRetry: {
+                maxNumRetry: 4,
+                retryDelayMs: 400,
+                maxRetryDelayMs: 3000,
+              },
+              errorRetry: {
+                maxNumRetry: 4,
+                retryDelayMs: 400,
+                maxRetryDelayMs: 3000,
+              },
+            },
+          },
+          manifestLoadPolicy: {
+            default: {
+              maxTimeToFirstByteMs: 20000,
+              maxLoadTimeMs: 25000,
+              timeoutRetry: {
+                maxNumRetry: 4,
+                retryDelayMs: 400,
+                maxRetryDelayMs: 3000,
+              },
+              errorRetry: {
+                maxNumRetry: 4,
+                retryDelayMs: 400,
+                maxRetryDelayMs: 3000,
+              },
+            },
+          },
         });
 
         let initialAudioSelected = false;
@@ -1170,21 +1315,31 @@ function renderDirectVideoHtml(
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
           preferPortugueseTrack();
-          attemptAutoplay();
+          safePlay();
         });
 
         hls.on(window.Hls.Events.LEVEL_LOADED, (_ev, data) => {
           if (data && data.details && Array.isArray(data.details.fragments)) {
             videoFrags = data.details.fragments;
-            pumpPrefetch();
+            scheduleInitialWarm();
           }
         });
 
         hls.on(window.Hls.Events.AUDIO_TRACK_LOADED, (_ev, data) => {
           if (data && data.details && Array.isArray(data.details.fragments)) {
             audioFrags = data.details.fragments;
-            pumpPrefetch();
+            if (!initialPlaylistsReady) {
+              scheduleInitialWarm();
+            } else {
+              pumpServerWarm(true);
+            }
           }
+        });
+
+        hls.on(window.Hls.Events.FRAG_BUFFERED, evaluateBufferGate);
+        hls.on(window.Hls.Events.BUFFER_EOS, () => {
+          streamEnded = true;
+          evaluateBufferGate();
         });
 
         hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, preferPortugueseTrack);
@@ -1200,8 +1355,8 @@ function renderDirectVideoHtml(
         });
       } else {
         video.src = src;
-        video.addEventListener('loadedmetadata', attemptAutoplay, { once: true });
-        attemptAutoplay();
+        video.addEventListener('loadedmetadata', safePlay, { once: true });
+        safePlay();
       }
     })();
   </script>
@@ -1935,6 +2090,61 @@ export function registerApiRoutes(app: Express): void {
     }
   });
 
+  app.post('/api/supercdn/hls-warm-batch', async (req: Request, res: Response) => {
+    try {
+      const rawUrls: unknown[] = Array.isArray(req.body?.urls) ? req.body.urls : [];
+      const validTargets: Array<{ idx: number; targetUrl: string; origin: string }> = [];
+
+      for (let idx = 0; idx < Math.min(rawUrls.length, 32); idx++) {
+        const raw = rawUrls[idx];
+        if (typeof raw !== 'string' || !raw) continue;
+        try {
+          const parsed = new URL(raw, 'http://localhost');
+          const kind = parsed.searchParams.get('kind') || 'segment';
+          const targetUrl = parsed.searchParams.get('u') || '';
+          const origin = parsed.searchParams.get('o') || 'https://vaiquecol.com';
+          const sig = parsed.searchParams.get('s') || '';
+          if (
+            kind === 'segment' &&
+            targetUrl &&
+            /^https?:\/\//i.test(targetUrl) &&
+            verifyHlsProxySignature(targetUrl, origin, 'segment', sig)
+          ) {
+            validTargets.push({ idx, targetUrl, origin });
+          }
+        } catch {
+          // skip malformed entry
+        }
+      }
+
+      if (validTargets.length === 0) {
+        res.status(200).json({ ok: true, warmed: [], count: 0 });
+        return;
+      }
+
+      const warmedIndices: number[] = [];
+      const tasks = validTargets.map(async (item) => {
+        const seg = await getOrFetchCachedSegment(item.targetUrl, item.origin);
+        if (seg) {
+          warmedIndices.push(item.idx);
+        }
+      });
+
+      await Promise.race([
+        Promise.allSettled(tasks),
+        new Promise((resolve) => setTimeout(resolve, 24000)),
+      ]);
+
+      res.status(200).json({
+        ok: true,
+        warmed: warmedIndices,
+        count: warmedIndices.length,
+      });
+    } catch {
+      res.status(200).json({ ok: false, warmed: [], count: 0 });
+    }
+  });
+
   app.get('/api/supercdn/hls-proxy', async (req: Request, res: Response) => {
     try {
       const kind = String(req.query.kind || 'segment');
@@ -1994,6 +2204,9 @@ export function registerApiRoutes(app: Express): void {
         res.send(subText);
         return;
       }
+
+      // Kick off automatic server-side parallel read-ahead (also covers iOS Safari native HLS)
+      triggerServerReadAhead(targetUrl, origin);
 
       // Segment delivery: use deduplicated warm cache for standard full-segment requests
       if (!req.headers.range) {
@@ -2068,7 +2281,7 @@ export function registerApiRoutes(app: Express): void {
 // Standalone Express app exported as default for Vercel Serverless Functions (/api/*)
 const vercelApiApp = express();
 vercelApiApp.disable('x-powered-by');
-vercelApiApp.use(express.json());
+vercelApiApp.use(express.json({ limit: '256kb' }));
 registerApiRoutes(vercelApiApp);
 
 export default vercelApiApp;
