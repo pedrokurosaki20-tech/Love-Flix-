@@ -146,23 +146,25 @@ export const MediaDetailPage: React.FC<{
 
   const handleShare = async () => {
     if (!detail) return;
-    const shareTitle = `${getMediaTitle(detail)} — Love Flix`;
-    const shareUrl = window.location.href;
+    const mediaTitle = getMediaTitle(detail);
+    const shareMessage = `🎬 Encontrei algo especial para você!\n\n🍿 ${mediaTitle}\n\nQue tal dar o play e aproveitar essa experiência?\n\n❤️ Assista agora na Love Flix:\nhttps://love-flix.vercel.app/`;
+
     try {
       if (navigator.share) {
         await navigator.share({
-          title: shareTitle,
-          text: detail.overview || shareTitle,
-          url: shareUrl,
+          text: shareMessage,
         });
       } else {
-        await navigator.clipboard.writeText(shareUrl);
-        pushToast('Link copiado para a área de transferência', 'accent');
+        await navigator.clipboard.writeText(shareMessage);
+        pushToast('Mensagem copiada para a área de transferência', 'accent');
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
       try {
-        await navigator.clipboard.writeText(shareUrl);
-        pushToast('Link copiado para a área de transferência', 'accent');
+        await navigator.clipboard.writeText(shareMessage);
+        pushToast('Mensagem copiada para a área de transferência', 'accent');
       } catch {
         // ignore
       }
