@@ -1,9 +1,11 @@
 import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerApiRoutes } from './server/registerApiRoutes.js';
+import { attachExternalBridgeWebSocketServer } from './server/externalBridgeSocket.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +15,15 @@ const PORT = Number(process.env.PORT) || 3000;
 async function startServer() {
   const app = express();
   app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', 'frame-ancestors *');
+    next();
+  });
   app.use(express.json({ limit: '256kb' }));
+
+  const httpServer = http.createServer(app);
+  attachExternalBridgeWebSocketServer(httpServer);
 
   registerApiRoutes(app);
 
@@ -34,7 +44,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Love Flix server running on http://0.0.0.0:${PORT}`);
   });
 }

@@ -225,6 +225,44 @@ export function renderDirectVideoHtml(
       let playPending = false;
       let streamEnded = false;
       let waitingTimer = null;
+      let applyingRemoteSync = false;
+      let remoteSyncTimer = null;
+      let resumingFromGate = false;
+      let isInitialAutoplay = true;
+      let pendingRemoteState = null;
+
+      const postToParent = (payload) => {
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage(payload, '*');
+          }
+        } catch {}
+      };
+
+      const markRemoteSync = (ms) => {
+        applyingRemoteSync = true;
+        if (remoteSyncTimer) clearTimeout(remoteSyncTimer);
+        remoteSyncTimer = setTimeout(() => {
+          applyingRemoteSync = false;
+          remoteSyncTimer = null;
+        }, ms || 450);
+      };
+
+      try {
+        const initParams = new URLSearchParams(window.location.search);
+        const startAtRaw = Number(initParams.get('startAt'));
+        const pausedParam = initParams.get('paused');
+        if ((Number.isFinite(startAtRaw) && startAtRaw > 0) || pausedParam === '1' || pausedParam === 'true') {
+          pendingRemoteState = {
+            type: 'LOVEFLIX_PLAYER_COMMAND',
+            command: 'sync',
+            positionSec: Number.isFinite(startAtRaw) && startAtRaw > 0 ? startAtRaw : 0,
+            paused: pausedParam === '1' || pausedParam === 'true',
+          };
+        }
+      } catch {}
+
+      postToParent({ type: 'LOVEFLIX_PLAYER_IFRAME_BOOT' });
 
       const showSpinner = () => {
         spinner.classList.remove('hidden');
@@ -315,22 +353,151 @@ export function renderDirectVideoHtml(
           initialCushionDone = true;
           gatePaused = false;
           hideSpinner();
+          resumingFromGate = true;
           safePlay();
         }
       };
 
       setInterval(evaluateBufferGate, 250);
 
+      const applyRemoteCommandNow = (cmd) => {
+        if (!cmd || typeof cmd !== 'object') return;
+        markRemoteSync(500);
+        isInitialAutoplay = false;
+
+        if (typeof cmd.playbackRate === 'number' && cmd.playbackRate >= 0.25 && cmd.playbackRate <= 4) {
+          if (Math.abs((video.playbackRate || 1) - cmd.playbackRate) > 0.04) {
+            try { video.playbackRate = cmd.playbackRate; } catch {}
+          }
+        }
+
+        if (typeof cmd.positionSec === 'number' && Number.isFinite(cmd.positionSec) && cmd.positionSec >= 0) {
+          const drift = Math.abs((video.currentTime || 0) - cmd.positionSec);
+          const threshold = cmd.command === 'seek' ? 0.35 : 1.35;
+          if (drift > threshold) {
+            try { video.currentTime = Math.max(0, cmd.positionSec); } catch {}
+          }
+        }
+
+        if (cmd.command === 'pause' || cmd.paused === true) {
+          userPaused = true;
+          gatePaused = false;
+          tapPlay.classList.remove('visible');
+          spinner.classList.add('hidden');
+          try { video.pause(); } catch {}
+        } else if (cmd.command === 'play' || cmd.paused === false) {
+          userPaused = false;
+          safePlay();
+        }
+      };
+
+      window.addEventListener('message', (ev) => {
+        const d = ev && ev.data;
+        if (!d || typeof d !== 'object') return;
+        if (d.type === 'LOVEFLIX_PLAYER_GET_STATE') {
+          postToParent({
+            type: 'LOVEFLIX_PLAYER_STATE',
+            positionSec: video.currentTime || 0,
+            duration: Number.isFinite(video.duration) ? video.duration : 0,
+            paused: Boolean(video.paused && !gatePaused),
+            playbackRate: video.playbackRate || 1,
+          });
+          return;
+        }
+        if (d.type !== 'LOVEFLIX_PLAYER_COMMAND') return;
+        if (video.readyState < 1) {
+          pendingRemoteState = d;
+          return;
+        }
+        applyRemoteCommandNow(d);
+      });
+
+      video.addEventListener('loadedmetadata', () => {
+        postToParent({
+          type: 'LOVEFLIX_PLAYER_READY',
+          duration: Number.isFinite(video.duration) ? video.duration : 0,
+        });
+        if (pendingRemoteState) {
+          const queued = pendingRemoteState;
+          pendingRemoteState = null;
+          applyRemoteCommandNow(queued);
+        }
+      });
+
       video.addEventListener('pause', () => {
         if (!gatePaused && !video.ended && !playPending) {
           userPaused = true;
+          isInitialAutoplay = false;
           spinner.classList.add('hidden');
+          if (!applyingRemoteSync) {
+            postToParent({
+              type: 'LOVEFLIX_PLAYER_EVENT',
+              action: 'pause',
+              paused: true,
+              positionSec: video.currentTime || 0,
+              playbackRate: video.playbackRate || 1,
+            });
+          }
         }
       });
 
       video.addEventListener('play', () => {
         if (!gatePaused) {
           userPaused = false;
+          const wasGateResume = resumingFromGate;
+          resumingFromGate = false;
+          if (isInitialAutoplay) {
+            isInitialAutoplay = false;
+            return;
+          }
+          if (!applyingRemoteSync && !wasGateResume) {
+            postToParent({
+              type: 'LOVEFLIX_PLAYER_EVENT',
+              action: 'play',
+              paused: false,
+              positionSec: video.currentTime || 0,
+              playbackRate: video.playbackRate || 1,
+            });
+          }
+        }
+      });
+
+      video.addEventListener('seeked', () => {
+        isInitialAutoplay = false;
+        if (!applyingRemoteSync) {
+          postToParent({
+            type: 'LOVEFLIX_PLAYER_EVENT',
+            action: 'seek',
+            paused: Boolean(video.paused && !gatePaused),
+            positionSec: video.currentTime || 0,
+            playbackRate: video.playbackRate || 1,
+          });
+        }
+      });
+
+      video.addEventListener('ratechange', () => {
+        if (!applyingRemoteSync) {
+          postToParent({
+            type: 'LOVEFLIX_PLAYER_EVENT',
+            action: 'ratechange',
+            paused: Boolean(video.paused && !gatePaused),
+            positionSec: video.currentTime || 0,
+            playbackRate: video.playbackRate || 1,
+          });
+        }
+      });
+
+      let lastReportedTimeAt = 0;
+      video.addEventListener('timeupdate', () => {
+        const now = Date.now();
+        if (now - lastReportedTimeAt > 2000) {
+          lastReportedTimeAt = now;
+          postToParent({
+            type: 'LOVEFLIX_PLAYER_TIME',
+            positionSec: video.currentTime || 0,
+            paused: Boolean(video.paused && !gatePaused),
+            playbackRate: video.playbackRate || 1,
+          });
         }
       });
 
@@ -683,13 +850,25 @@ export function renderDirectVideoHtml(
         hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, preferPortugueseTrack);
         hls.on(window.Hls.Events.AUDIO_TRACK_SWITCHED, renderAudioButtons);
 
+        let fatalRecoverAttempts = 0;
         hls.on(window.Hls.Events.ERROR, (_ev, data) => {
           if (!data || !data.fatal) return;
-          if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-            hls.startLoad();
-          } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
-            hls.recoverMediaError();
+          fatalRecoverAttempts += 1;
+          if (fatalRecoverAttempts <= 2) {
+            if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+              hls.startLoad();
+              return;
+            }
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              hls.recoverMediaError();
+              return;
+            }
           }
+          try {
+            if (window.parent && window.parent !== window) {
+              window.parent.postMessage({ type: 'LOVEFLIX_CHANNEL_FALLBACK' }, '*');
+            }
+          } catch {}
         });
       } else {
         video.src = src;

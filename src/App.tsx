@@ -7,6 +7,7 @@ import React from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { UserDataProvider } from './context/UserDataContext';
 import { NavigationProvider, useNavigation } from './context/NavigationContext';
+import { ExternalRoomProvider } from './context/ExternalRoomContext';
 import { Header } from './components/Header';
 import { FloatingDock } from './components/FloatingDock';
 import { Footer } from './components/Footer';
@@ -103,7 +104,9 @@ export default function App() {
   return (
     <UserDataProvider>
       <NavigationProvider>
-        <AppWorkspace />
+        <ExternalRoomProvider>
+          <AppWorkspace />
+        </ExternalRoomProvider>
       </NavigationProvider>
     </UserDataProvider>
   );

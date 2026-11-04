@@ -5,15 +5,34 @@ import {
   warmInitialHlsStream,
   type SubtitleTrackItem,
 } from './hlsEngine.js';
+import {
+  STREAMBETTER_PUBLIC_KEY,
+  checkSuperFlixCatalogAvailable,
+  probeStreamBetterAvailable,
+} from './catalogAvailability.js';
 import { renderStatusHtml, renderDirectVideoHtml } from './playerHtml.js';
 
 export interface SuperCdnResolvedEntry {
   kind: 'redirect' | 'html';
+  available: boolean;
+  resolvedChannel: 1 | 2 | 3;
   url?: string;
   html?: string;
   masterHlsUrl?: string;
   embedOrigin?: string;
+  directMediaUrl?: string;
+  subtitleTracks?: SubtitleTrackItem[];
   expiresAt: number;
+}
+
+export interface ChannelAvailabilityReport {
+  availableChannels: Array<1 | 2 | 3>;
+  recommendedChannel: 1 | 2 | 3 | null;
+  channels: {
+    1: boolean;
+    2: boolean;
+    3: boolean;
+  };
 }
 
 interface ResolvedProviderOption {
@@ -28,10 +47,10 @@ interface TitleProvidersMap {
   slot1: ResolvedProviderOption | null;
   slot2Url: string;
   slot3Url: string;
+  hasExplicitSuperFlix: boolean;
+  hasExplicitStreamBetter: boolean;
   expiresAt: number;
 }
-
-const STREAMBETTER_PUBLIC_KEY = 'sb_pk_49d645d49ff1a48b6bba90db256a9ea5c308fd26acabb415';
 
 const superCdnStreamCache = new Map<string, SuperCdnResolvedEntry>();
 const SUPERCDN_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
@@ -40,6 +59,13 @@ const inFlightChannelResolves = new Map<string, Promise<SuperCdnResolvedEntry>>(
 const titleProvidersCache = new Map<string, TitleProvidersMap>();
 const TITLE_PROVIDERS_TTL_MS = 3 * 60 * 1000; // 3 minutes
 const inFlightTitleProviders = new Map<string, Promise<TitleProvidersMap>>();
+
+const availabilityCache = new Map<
+  string,
+  { report: ChannelAvailabilityReport; expiresAt: number }
+>();
+const inFlightAvailability = new Map<string, Promise<ChannelAvailabilityReport>>();
+const AVAILABILITY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function encodePackerBase(num: number, radix: number): string {
   const prefix = num < radix ? '' : encodePackerBase(Math.floor(num / radix), radix);
@@ -124,7 +150,8 @@ async function resolveAllTitleProviders(params: {
   episode: string;
 }): Promise<TitleProvidersMap> {
   const { type, imdb, tmdbId, season, episode } = params;
-  const mapKey = `${type}:${imdb}:${season}:${episode}:${tmdbId || ''}`;
+  const hasValidImdb = /^tt\d{4,12}$/i.test(imdb);
+  const mapKey = `${type}:${imdb || 'noimdb'}:${season}:${episode}:${tmdbId || ''}`;
   const cached = titleProvidersCache.get(mapKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached;
@@ -134,36 +161,37 @@ async function resolveAllTitleProviders(params: {
   if (inflight) return inflight;
 
   const work = (async (): Promise<TitleProvidersMap> => {
+    let html = '';
+    let cookieHeader = '';
+    let pageOk = false;
     const superCdnPageUrl =
       type === 'movie'
         ? `${SUPERCDN_BASE_URL}/movie/${imdb}`
         : `${SUPERCDN_BASE_URL}/tvshow/${imdb}/${season}/${episode}`;
 
-    const pageController = new AbortController();
-    const pageTimeout = setTimeout(() => pageController.abort(), 12000);
+    if (hasValidImdb) {
+      const pageController = new AbortController();
+      const pageTimeout = setTimeout(() => pageController.abort(), 9000);
 
-    let html = '';
-    let cookieHeader = '';
-    let pageOk = false;
-
-    try {
-      const pageRes = await fetch(superCdnPageUrl, {
-        method: 'GET',
-        headers: {
-          Referer: `${SUPERCDN_BASE_URL}/`,
-          'User-Agent': BROWSER_USER_AGENT,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        },
-        signal: pageController.signal,
-      });
-      pageOk = pageRes.ok;
-      cookieHeader = extractCookieHeader(pageRes.headers);
-      html = pageRes.ok ? await pageRes.text() : '';
-    } catch {
-      pageOk = false;
-    } finally {
-      clearTimeout(pageTimeout);
+      try {
+        const pageRes = await fetch(superCdnPageUrl, {
+          method: 'GET',
+          headers: {
+            Referer: `${SUPERCDN_BASE_URL}/`,
+            'User-Agent': BROWSER_USER_AGENT,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+          },
+          signal: pageController.signal,
+        });
+        pageOk = pageRes.ok;
+        cookieHeader = extractCookieHeader(pageRes.headers);
+        html = pageRes.ok ? await pageRes.text() : '';
+      } catch {
+        pageOk = false;
+      } finally {
+        clearTimeout(pageTimeout);
+      }
     }
 
     const candidates: Array<{ videoId: string; isDublado: boolean }> = [];
@@ -242,7 +270,7 @@ async function resolveAllTitleProviders(params: {
                 action: 'getOptions',
                 contentid: episodeContentId,
               }).toString(),
-              signal: AbortSignal.timeout(8000),
+              signal: AbortSignal.timeout(6500),
             });
 
             if (optRes.ok) {
@@ -285,7 +313,7 @@ async function resolveAllTitleProviders(params: {
                 action: 'getPlayer',
                 video_id: cand.videoId,
               }).toString(),
-              signal: AbortSignal.timeout(8000),
+              signal: AbortSignal.timeout(6500),
             });
             if (!playerRes.ok) return null;
             const rawBody = await playerRes.text();
@@ -320,7 +348,10 @@ async function resolveAllTitleProviders(params: {
     let slot2Url = superFlixOption?.url || '';
     if (!slot2Url) {
       if (type === 'movie') {
-        slot2Url = `https://superflixapi.fun/filme/${imdb}#noEpList`;
+        const movieRef = hasValidImdb ? imdb : tmdbId || '';
+        if (movieRef) {
+          slot2Url = `https://superflixapi.fun/filme/${movieRef}#noEpList`;
+        }
       } else if (tmdbId) {
         slot2Url = `https://superflixapi.fun/serie/${tmdbId}/${season}/${episode}#noEpList`;
       }
@@ -337,7 +368,10 @@ async function resolveAllTitleProviders(params: {
     let slot3Url = streamBetterOption?.url || otherThirdPartyOption?.url || '';
     if (!slot3Url) {
       if (type === 'movie') {
-        slot3Url = `https://streambetter.lol/filme/${tmdbId || imdb}?key=${STREAMBETTER_PUBLIC_KEY}`;
+        const movieRef = tmdbId || (hasValidImdb ? imdb : '');
+        if (movieRef) {
+          slot3Url = `https://streambetter.lol/filme/${movieRef}?key=${STREAMBETTER_PUBLIC_KEY}`;
+        }
       } else if (tmdbId) {
         slot3Url = `https://streambetter.lol/serie/${tmdbId}/${season}/${episode}?key=${STREAMBETTER_PUBLIC_KEY}`;
       }
@@ -347,6 +381,8 @@ async function resolveAllTitleProviders(params: {
       slot1,
       slot2Url,
       slot3Url,
+      hasExplicitSuperFlix: Boolean(superFlixOption),
+      hasExplicitStreamBetter: Boolean(streamBetterOption || otherThirdPartyOption),
       expiresAt: Date.now() + TITLE_PROVIDERS_TTL_MS,
     };
     titleProvidersCache.set(mapKey, mapped);
@@ -371,7 +407,7 @@ export async function resolveSuperCdnChannel(params: {
   warmOnly?: boolean;
 }): Promise<SuperCdnResolvedEntry> {
   const { type, imdb, tmdbId, season, episode, channel, warmOnly } = params;
-  const cacheKey = `${type}:${imdb}:${season}:${episode}:${channel}`;
+  const cacheKey = `${type}:${imdb || 'noimdb'}:${tmdbId || ''}:${season}:${episode}:${channel}`;
   const cached = superCdnStreamCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     if (warmOnly && cached.masterHlsUrl && cached.embedOrigin) {
@@ -395,18 +431,26 @@ export async function resolveSuperCdnChannel(params: {
     });
 
     if (channel === 2) {
-      if (!providers.slot2Url) {
+      const sfCatalog = providers.hasExplicitSuperFlix
+        ? true
+        : await checkSuperFlixCatalogAvailable({ type, tmdbId, imdb });
+
+      if (!providers.slot2Url || sfCatalog === false) {
         return {
           kind: 'html',
+          available: false,
+          resolvedChannel: 2,
           html: renderStatusHtml(
             'Canal 2 indisponível para este título',
-            'Selecione Canal 1 ou Canal 3 no topo do reprodutor para iniciar a transmissão.'
+            'Selecione outro canal disponível no topo do reprodutor para iniciar a transmissão.'
           ),
           expiresAt: Date.now() + 30 * 1000,
         };
       }
       const entry: SuperCdnResolvedEntry = {
         kind: 'redirect',
+        available: true,
+        resolvedChannel: 2,
         url: providers.slot2Url,
         expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
       };
@@ -415,18 +459,26 @@ export async function resolveSuperCdnChannel(params: {
     }
 
     if (channel === 3) {
-      if (!providers.slot3Url) {
+      const sbOk = providers.hasExplicitStreamBetter
+        ? true
+        : await probeStreamBetterAvailable(providers.slot3Url);
+
+      if (!providers.slot3Url || !sbOk) {
         return {
           kind: 'html',
+          available: false,
+          resolvedChannel: 3,
           html: renderStatusHtml(
             'Canal 3 indisponível para este título',
-            'Selecione Canal 1 ou Canal 2 no topo do reprodutor para iniciar a transmissão.'
+            'Selecione outro canal disponível no topo do reprodutor para iniciar a transmissão.'
           ),
           expiresAt: Date.now() + 30 * 1000,
         };
       }
       const entry: SuperCdnResolvedEntry = {
         kind: 'redirect',
+        available: true,
+        resolvedChannel: 3,
         url: providers.slot3Url,
         expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
       };
@@ -439,9 +491,11 @@ export async function resolveSuperCdnChannel(params: {
     if (!slot1 || !slot1.url) {
       return {
         kind: 'html',
+        available: false,
+        resolvedChannel: 1,
         html: renderStatusHtml(
           'Canal 1 indisponível para este título',
-          'Toque em Canal 2 ou Canal 3 no topo da tela para assistir imediatamente.'
+          'Toque em outro canal disponível no topo da tela para assistir imediatamente.'
         ),
         expiresAt: Date.now() + 30 * 1000,
       };
@@ -457,7 +511,11 @@ export async function resolveSuperCdnChannel(params: {
           : [];
       const entry: SuperCdnResolvedEntry = {
         kind: 'html',
+        available: true,
+        resolvedChannel: 1,
         html: renderDirectVideoHtml(resolvedStreamUrl, captionTracks),
+        directMediaUrl: resolvedStreamUrl,
+        subtitleTracks: captionTracks,
         expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
       };
       superCdnStreamCache.set(cacheKey, entry);
@@ -481,7 +539,7 @@ export async function resolveSuperCdnChannel(params: {
           'User-Agent': BROWSER_USER_AGENT,
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(8500),
       });
 
       if (embedRes.ok) {
@@ -556,7 +614,7 @@ export async function resolveSuperCdnChannel(params: {
                 hash: fireHash,
                 r: `${SUPERCDN_BASE_URL}/`,
               }).toString(),
-              signal: AbortSignal.timeout(10000),
+              signal: AbortSignal.timeout(8500),
             }
           );
 
@@ -579,9 +637,12 @@ export async function resolveSuperCdnChannel(params: {
               const playerHtml = renderDirectVideoHtml(proxiedMasterPath, subtitleTracks, null);
               const entry: SuperCdnResolvedEntry = {
                 kind: 'html',
+                available: true,
+                resolvedChannel: 1,
                 html: playerHtml,
                 masterHlsUrl,
                 embedOrigin,
+                subtitleTracks,
                 expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
               };
               superCdnStreamCache.set(cacheKey, entry);
@@ -600,9 +661,11 @@ export async function resolveSuperCdnChannel(params: {
 
       return {
         kind: 'html',
+        available: false,
+        resolvedChannel: 1,
         html: renderStatusHtml(
           'Canal 1 indisponível para este título',
-          'Toque em Canal 2 ou Canal 3 no topo da tela para assistir imediatamente.'
+          'Toque em outro canal disponível no topo da tela para assistir imediatamente.'
         ),
         expiresAt: Date.now() + 30 * 1000,
       };
@@ -610,6 +673,8 @@ export async function resolveSuperCdnChannel(params: {
 
     const entry: SuperCdnResolvedEntry = {
       kind: 'redirect',
+      available: true,
+      resolvedChannel: 1,
       url: resolvedStreamUrl,
       expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
     };
@@ -621,10 +686,142 @@ export async function resolveSuperCdnChannel(params: {
   try {
     return await task;
   } finally {
-    inFlightChannelResolves.delete(mapKeySafe(cacheKey));
+    inFlightChannelResolves.delete(cacheKey);
   }
 }
 
-function mapKeySafe(key: string): string {
-  return key;
+/**
+ * Stage 2: Real-Time 3-Channel Availability Check + Pre-Warm
+ * Checks Canal 1 (SuperCDN HLS), Canal 2 (SuperFlix), and Canal 3 (StreamBetter) in parallel
+ * while pre-warming Canal 1 playlists if available.
+ */
+export async function checkTitleChannelAvailability(params: {
+  type: 'movie' | 'tvshow';
+  imdb: string;
+  tmdbId?: string;
+  season: string;
+  episode: string;
+}): Promise<ChannelAvailabilityReport> {
+  const { type, imdb, tmdbId, season, episode } = params;
+  const key = `${type}:${imdb || 'noimdb'}:${tmdbId || ''}:${season}:${episode}`;
+  const cached = availabilityCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.report;
+  }
+
+  const inflight = inFlightAvailability.get(key);
+  if (inflight) return inflight;
+
+  const work = (async (): Promise<ChannelAvailabilityReport> => {
+    const providers = await resolveAllTitleProviders({
+      type,
+      imdb,
+      tmdbId,
+      season,
+      episode,
+    });
+
+    const [ch1Entry, sfStatus, sbAvailable] = await Promise.all([
+      providers.slot1
+        ? resolveSuperCdnChannel({
+            type,
+            imdb,
+            tmdbId,
+            season,
+            episode,
+            channel: 1,
+            warmOnly: false,
+          }).catch(() => null)
+        : Promise.resolve(null),
+      providers.hasExplicitSuperFlix
+        ? Promise.resolve(true as const)
+        : checkSuperFlixCatalogAvailable({ type, tmdbId, imdb }),
+      providers.hasExplicitStreamBetter
+        ? Promise.resolve(true)
+        : probeStreamBetterAvailable(providers.slot3Url),
+    ]);
+
+    const ch1Ok = Boolean(ch1Entry && ch1Entry.available);
+    const ch2Ok = Boolean(providers.slot2Url) && sfStatus !== false;
+    const ch3Ok = Boolean(providers.slot3Url) && sbAvailable;
+
+    const availableChannels: Array<1 | 2 | 3> = [];
+    if (ch1Ok) availableChannels.push(1);
+    if (ch2Ok) availableChannels.push(2);
+    if (ch3Ok) availableChannels.push(3);
+
+    const report: ChannelAvailabilityReport = {
+      availableChannels,
+      recommendedChannel: availableChannels[0] ?? null,
+      channels: {
+        1: ch1Ok,
+        2: ch2Ok,
+        3: ch3Ok,
+      },
+    };
+
+    if (availabilityCache.size > 600) {
+      const oldest = availabilityCache.keys().next().value;
+      if (oldest) availabilityCache.delete(oldest);
+    }
+    availabilityCache.set(key, {
+      report,
+      expiresAt: Date.now() + AVAILABILITY_CACHE_TTL_MS,
+    });
+
+    return report;
+  })();
+
+  inFlightAvailability.set(key, work);
+  try {
+    return await work;
+  } finally {
+    inFlightAvailability.delete(key);
+  }
+}
+
+/**
+ * Stage 3: Automatic Channel Fallback
+ * Resolves the requested channel; if unavailable for this title/episode, automatically
+ * falls back to the next working channel in [1, 2, 3] order so playback never hits a dead end.
+ */
+export async function resolveStreamWithFallback(params: {
+  type: 'movie' | 'tvshow';
+  imdb: string;
+  tmdbId?: string;
+  season: string;
+  episode: string;
+  channel: 1 | 2 | 3;
+  warmOnly?: boolean;
+  allowFallback?: boolean;
+}): Promise<SuperCdnResolvedEntry> {
+  const primary = await resolveSuperCdnChannel(params);
+  if (primary.available || params.warmOnly || params.allowFallback === false) {
+    return primary;
+  }
+
+  const fallbackOrder: Array<1 | 2 | 3> = ([1, 2, 3] as const).filter(
+    (c) => c !== params.channel
+  );
+
+  for (const altChannel of fallbackOrder) {
+    const candidate = await resolveSuperCdnChannel({
+      ...params,
+      channel: altChannel,
+    });
+    if (candidate.available) {
+      return candidate;
+    }
+  }
+
+  return {
+    kind: 'html',
+    available: false,
+    resolvedChannel: params.channel,
+    html: renderStatusHtml(
+      'Conteúdo temporariamente indisponível',
+      'Este episódio ou título ainda não está disponível nos servidores de transmissão no momento.'
+    ),
+    expiresAt: Date.now() + 30 * 1000,
+  };
 }

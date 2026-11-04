@@ -11,8 +11,13 @@ import {
   getOrFetchCachedSegment,
   triggerServerReadAhead,
 } from './hlsEngine.js';
+import { discoverCuratedDoramas } from './catalogAvailability.js';
 import { renderStatusHtml } from './playerHtml.js';
-import { resolveSuperCdnChannel } from './supercdnResolver.js';
+import {
+  checkTitleChannelAvailability,
+  resolveStreamWithFallback,
+} from './supercdnResolver.js';
+import { registerExternalBridgeRoutes } from './externalRoomBridge.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -58,10 +63,13 @@ const ALLOWED_PREFIXES = [
 
 export function registerApiRoutes(app: Express): void {
   // Normalize Vercel rewrite paths if /api prefix was stripped
-  app.use((req, _res, next) => {
+  app.use((req, res, next) => {
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', 'frame-ancestors *');
     if (
       req.url.startsWith('/tmdb/') ||
       req.url.startsWith('/supercdn/') ||
+      req.url.startsWith('/bridge/') ||
       req.url === '/health' ||
       req.url.startsWith('/health?')
     ) {
@@ -69,6 +77,8 @@ export function registerApiRoutes(app: Express): void {
     }
     next();
   });
+
+  registerExternalBridgeRoutes(app);
 
   app.get('/api/health', (_req: Request, res: Response) => {
     const apiKey = process.env.TMDB_API_KEY || FALLBACK_SERVER_KEY;
@@ -164,6 +174,66 @@ export function registerApiRoutes(app: Express): void {
     }
   });
 
+  // Stage 1: Curated Doramas Discovery Endpoint (filters out 0-channel Asian broadcast shows)
+  app.get('/api/supercdn/doramas', async (req: Request, res: Response) => {
+    try {
+      const data = await discoverCuratedDoramas(req.query as Record<string, unknown>);
+      if (!data) {
+        res.status(502).json({ error: 'Não foi possível consultar o catálogo de doramas.' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'public, max-age=180, s-maxage=900');
+      res.status(200).json(data);
+    } catch {
+      res.status(502).json({ error: 'Falha ao carregar catálogo curado de doramas.' });
+    }
+  });
+
+  // Stage 2: Real-Time 3-Channel Availability Inspection + Canal 1 Pre-Warm
+  app.get('/api/supercdn/availability', async (req: Request, res: Response) => {
+    try {
+      const rawType = String(req.query.type || 'movie').toLowerCase();
+      const type: 'movie' | 'tvshow' =
+        rawType === 'tv' || rawType === 'tvshow' ? 'tvshow' : 'movie';
+      const imdb = String(req.query.imdb || '').trim();
+      const tmdbId = String(req.query.tmdbId || '').replace(/\D/g, '');
+      const season = String(Math.max(1, Number(req.query.season) || 1));
+      const episode = String(Math.max(1, Number(req.query.episode) || 1));
+
+      if (!/^tt\d{4,12}$/i.test(imdb) && !tmdbId) {
+        res.status(200).json({
+          ok: true,
+          availableChannels: [],
+          recommendedChannel: null,
+          channels: { 1: false, 2: false, 3: false },
+        });
+        return;
+      }
+
+      const report = await checkTitleChannelAvailability({
+        type,
+        imdb,
+        tmdbId: tmdbId || undefined,
+        season,
+        episode,
+      });
+
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=300');
+      res.status(200).json({
+        ok: true,
+        ...report,
+      });
+    } catch {
+      res.status(200).json({
+        ok: false,
+        availableChannels: [1, 2, 3],
+        recommendedChannel: 1,
+        channels: { 1: true, 2: true, 3: true },
+      });
+    }
+  });
+
+  // Stage 3: Stream Resolver with Optional IMDb + Automatic Channel Fallback
   app.get('/api/supercdn/stream', async (req: Request, res: Response) => {
     try {
       const rawType = String(req.query.type || 'movie').toLowerCase();
@@ -176,8 +246,9 @@ export function registerApiRoutes(app: Express): void {
       const rawChannel = Number(req.query.channel) || 1;
       const channel: 1 | 2 | 3 = rawChannel === 2 ? 2 : rawChannel === 3 ? 3 : 1;
       const warmOnly = req.query.warm === '1';
+      const allowFallback = req.query.nofallback !== '1';
 
-      if (!/^tt\d{4,12}$/i.test(imdb)) {
+      if (!/^tt\d{4,12}$/i.test(imdb) && !tmdbId) {
         if (warmOnly) {
           res.status(204).end();
           return;
@@ -187,14 +258,14 @@ export function registerApiRoutes(app: Express): void {
           .setHeader('Content-Type', 'text/html; charset=utf-8')
           .send(
             renderStatusHtml(
-              'Identificador IMDb não encontrado',
-              'Este título ainda não possui código IMDb vinculado na base pública para reprodução.'
+              'Identificador não encontrado',
+              'Este título ainda não possui código vinculado para reprodução.'
             )
           );
         return;
       }
 
-      const resolved = await resolveSuperCdnChannel({
+      const resolved = await resolveStreamWithFallback({
         type,
         imdb,
         tmdbId: tmdbId || undefined,
@@ -202,10 +273,16 @@ export function registerApiRoutes(app: Express): void {
         episode,
         channel,
         warmOnly,
+        allowFallback,
       });
 
       if (warmOnly) {
-        res.status(200).json({ ok: true, kind: resolved.kind });
+        res.status(200).json({
+          ok: true,
+          kind: resolved.kind,
+          available: resolved.available,
+          resolvedChannel: resolved.resolvedChannel,
+        });
         return;
       }
 
@@ -235,13 +312,21 @@ export function registerApiRoutes(app: Express): void {
         .send(
           renderStatusHtml(
             'Falha ao conectar ao servidor de vídeo',
-            'Alternando ou tentando outro canal (Canal 1, Canal 2 ou Canal 3) você pode iniciar a reprodução imediatamente.'
+            'Alternando ou tentando outro canal você pode iniciar a reprodução imediatamente.'
           )
         );
     }
   });
 
+  app.options('/api/supercdn/hls-warm-batch', (_req: Request, res: Response) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.status(204).end();
+  });
+
   app.post('/api/supercdn/hls-warm-batch', async (req: Request, res: Response) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
     try {
       const rawUrls: unknown[] = Array.isArray(req.body?.urls) ? req.body.urls : [];
       const validTargets: Array<{ idx: number; targetUrl: string; origin: string }> = [];
@@ -281,7 +366,6 @@ export function registerApiRoutes(app: Express): void {
         }
       });
 
-      // Cap at 8.2s so Vercel Hobby (10s limit) always returns cleanly while in-flight fetches finish
       await Promise.race([
         Promise.allSettled(tasks),
         new Promise((resolve) => setTimeout(resolve, 8200)),
@@ -293,7 +377,16 @@ export function registerApiRoutes(app: Express): void {
     }
   });
 
+  app.options('/api/supercdn/hls-proxy', (_req: Request, res: Response) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+    res.status(204).end();
+  });
+
   app.get('/api/supercdn/hls-proxy', async (req: Request, res: Response) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
     try {
       const kind = String(req.query.kind || 'segment');
       const targetUrl = String(req.query.u || '');

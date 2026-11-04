@@ -11,7 +11,10 @@ import {
   X,
 } from 'lucide-react';
 import { useNavigation } from '../context/NavigationContext';
+import { useExternalRoom } from '../context/ExternalRoomContext';
+import { useUserData } from '../context/UserDataContext';
 import { tmdbService } from '../services/tmdb';
+import type { ExternalPlaybackAction } from '../types/externalRoom';
 
 const CHANNELS: Array<{ id: 1 | 2 | 3; label: string }> = [
   { id: 1, label: 'Canal 1' },
@@ -30,50 +33,83 @@ export const StreamingPlayerModal: React.FC = () => {
     closePlayerSession,
   } = useNavigation();
 
+  const {
+    isConnected: isRoomConnected,
+    isPickerMode,
+    returnUrl,
+    syncedMedia,
+    syncedPlayback,
+    syncMediaToExternalRoom,
+    syncPlaybackToExternalRoom,
+    getLiveRoomPositionSec,
+    subscribeRemotePlayback,
+    returnToExternalRoomApp,
+    isApplyingRemoteMediaChange,
+  } = useExternalRoom();
+  const { pushToast } = useUserData();
+
   const [prefetchedImdb, setPrefetchedImdb] = useState<string | null>(null);
   const [resolvingImdb, setResolvingImdb] = useState(false);
-  const [imdbLookupFailed, setImdbLookupFailed] = useState(false);
+  const [imdbChecked, setImdbChecked] = useState(false);
+
+  // Stage 2: Verified channels for the modal selector card
+  const [modalAvailableChannels, setModalAvailableChannels] = useState<Array<1 | 2 | 3> | null>(
+    null
+  );
+  const [checkingModalChannels, setCheckingModalChannels] = useState(false);
+
+  // Stage 2 & 3: Verified channels & auto-fallback inside active fullscreen player
+  const [resolvingActiveImdb, setResolvingActiveImdb] = useState(false);
+  const [activeAvailableChannels, setActiveAvailableChannels] = useState<Array<1 | 2 | 3> | null>(
+    null
+  );
+
   const [iframeLoading, setIframeLoading] = useState(false);
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
+  const [sendingToRoom, setSendingToRoom] = useState(false);
+  const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
 
   const playerScreenRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Prefetch IMDb ID immediately as soon as the 3-channel card opens
+  // 1. Resolve IMDb ID as soon as the 3-channel selector card opens
   useEffect(() => {
     if (!watchRequest) {
       setPrefetchedImdb(null);
       setResolvingImdb(false);
-      setImdbLookupFailed(false);
+      setImdbChecked(false);
+      setModalAvailableChannels(null);
+      setCheckingModalChannels(false);
       return;
     }
 
     if (watchRequest.imdbId && /^tt\d+/i.test(watchRequest.imdbId)) {
       setPrefetchedImdb(watchRequest.imdbId);
       setResolvingImdb(false);
-      setImdbLookupFailed(false);
+      setImdbChecked(true);
       return;
     }
 
     let cancelled = false;
     setPrefetchedImdb(null);
     setResolvingImdb(true);
-    setImdbLookupFailed(false);
+    setImdbChecked(false);
 
     tmdbService
       .getImdbId(watchRequest.mediaType, watchRequest.id)
       .then((found) => {
         if (cancelled) return;
         setPrefetchedImdb(found);
-        setImdbLookupFailed(!found);
       })
       .catch(() => {
-        if (!cancelled) {
-          setPrefetchedImdb(null);
-          setImdbLookupFailed(true);
-        }
+        if (!cancelled) setPrefetchedImdb(null);
       })
       .finally(() => {
-        if (!cancelled) setResolvingImdb(false);
+        if (!cancelled) {
+          setResolvingImdb(false);
+          setImdbChecked(true);
+        }
       });
 
     return () => {
@@ -81,32 +117,52 @@ export const StreamingPlayerModal: React.FC = () => {
     };
   }, [watchRequest]);
 
-  // Pre-warm all channel mappings + Canal 1 HLS playlists/segments while the user chooses a channel
+  // 2. Stage 2: Probe real availability across Canal 1, Canal 2, and Canal 3 + pre-warm Canal 1
   useEffect(() => {
-    if (!watchRequest || !prefetchedImdb) return;
-    const params = new URLSearchParams({
-      type: watchRequest.mediaType === 'tv' ? 'tvshow' : 'movie',
-      imdb: prefetchedImdb,
-      tmdbId: String(watchRequest.id),
-      channel: '1',
-      warm: '1',
-    });
-    if (watchRequest.mediaType === 'tv') {
-      params.set('season', String(watchRequest.season || 1));
-      params.set('episode', String(watchRequest.episode || 1));
-    }
-    fetch(`/api/supercdn/stream?${params.toString()}`, {
-      method: 'GET',
-      keepalive: true,
-    }).catch(() => {});
-  }, [watchRequest, prefetchedImdb]);
-
-  // If the user clicked a channel before IMDb prefetch finished, finish resolving inside the fullscreen player
-  useEffect(() => {
-    if (!activePlayer || activePlayer.imdbId) return;
+    if (!watchRequest || !imdbChecked) return;
 
     let cancelled = false;
-    setImdbLookupFailed(false);
+    setCheckingModalChannels(true);
+
+    tmdbService
+      .getChannelAvailability({
+        mediaType: watchRequest.mediaType,
+        id: watchRequest.id,
+        imdbId: prefetchedImdb,
+        season: watchRequest.season,
+        episode: watchRequest.episode,
+      })
+      .then((info) => {
+        if (cancelled) return;
+        setModalAvailableChannels(info.availableChannels);
+      })
+      .catch(() => {
+        if (!cancelled) setModalAvailableChannels([1, 2, 3]);
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingModalChannels(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [watchRequest, imdbChecked, prefetchedImdb]);
+
+  // 3. If user clicked a channel before IMDb finished resolving, complete IMDb lookup in background
+  useEffect(() => {
+    if (!activePlayer) {
+      setResolvingActiveImdb(false);
+      setActiveAvailableChannels(null);
+      return;
+    }
+
+    if (activePlayer.imdbId) {
+      setResolvingActiveImdb(false);
+      return;
+    }
+
+    let cancelled = false;
+    setResolvingActiveImdb(true);
 
     tmdbService
       .getImdbId(activePlayer.mediaType, activePlayer.id)
@@ -114,31 +170,220 @@ export const StreamingPlayerModal: React.FC = () => {
         if (cancelled) return;
         if (found) {
           updateActivePlayerImdb(found);
-        } else {
-          setImdbLookupFailed(true);
         }
       })
-      .catch(() => {
-        if (!cancelled) setImdbLookupFailed(true);
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setResolvingActiveImdb(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [activePlayer, updateActivePlayerImdb]);
+  }, [activePlayer?.id, activePlayer?.mediaType, activePlayer?.imdbId, updateActivePlayerImdb]);
 
-  // Track iframe loading spinner whenever channel or title changes
+  // 4. Stage 2 & Stage 3: Verify channels for activePlayer and auto-switch if current channel is unavailable
   useEffect(() => {
-    if (activePlayer?.imdbId) {
+    if (!activePlayer || resolvingActiveImdb) return;
+
+    let cancelled = false;
+
+    tmdbService
+      .getChannelAvailability({
+        mediaType: activePlayer.mediaType,
+        id: activePlayer.id,
+        imdbId: activePlayer.imdbId,
+        season: activePlayer.season,
+        episode: activePlayer.episode,
+      })
+      .then((info) => {
+        if (cancelled) return;
+        setActiveAvailableChannels(info.availableChannels);
+
+        if (
+          info.availableChannels.length > 0 &&
+          !info.availableChannels.includes(activePlayer.channel)
+        ) {
+          switchPlayerChannel(info.availableChannels[0]);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setActiveAvailableChannels([1, 2, 3]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activePlayer?.id,
+    activePlayer?.mediaType,
+    activePlayer?.imdbId,
+    activePlayer?.season,
+    activePlayer?.episode,
+    activePlayer?.channel,
+    resolvingActiveImdb,
+    switchPlayerChannel,
+  ]);
+
+  // 5. Stage 3 + External Room Sync: Listen for iframe events (fallback + play/pause/seek)
+  useEffect(() => {
+    if (!activePlayer) return;
+
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (!d || typeof d !== 'object') return;
+
+      if (d.type === 'LOVEFLIX_CHANNEL_FALLBACK') {
+        const pool =
+          activeAvailableChannels && activeAvailableChannels.length > 0
+            ? activeAvailableChannels
+            : ([1, 2, 3] as Array<1 | 2 | 3>);
+        const nextChannel = pool.find((c) => c !== activePlayer.channel);
+        if (nextChannel) {
+          setActiveAvailableChannels((prev) =>
+            prev ? prev.filter((c) => c !== activePlayer.channel) : [2, 3]
+          );
+          switchPlayerChannel(nextChannel);
+        }
+        return;
+      }
+
+      if (d.type === 'LOVEFLIX_PLAYER_READY' && isRoomConnected && iframeRef.current?.contentWindow) {
+        if (
+          syncedPlayback &&
+          (!syncedMedia ||
+            (syncedMedia.tmdbId === activePlayer.id &&
+              syncedMedia.mediaType === activePlayer.mediaType))
+        ) {
+          const liveSec = getLiveRoomPositionSec(syncedPlayback);
+          if (liveSec > 1.5 || syncedPlayback.paused) {
+            iframeRef.current.contentWindow.postMessage(
+              {
+                type: 'LOVEFLIX_PLAYER_COMMAND',
+                command: 'sync',
+                positionSec: liveSec,
+                paused: syncedPlayback.paused,
+                playbackRate: syncedPlayback.playbackRate || 1,
+              },
+              '*'
+            );
+          }
+        }
+        return;
+      }
+
+      if (d.type === 'LOVEFLIX_PLAYER_EVENT' && isRoomConnected) {
+        const action = String(d.action || '') as ExternalPlaybackAction;
+        if (action === 'play' || action === 'pause' || action === 'seek' || action === 'ratechange') {
+          syncPlaybackToExternalRoom({
+            action,
+            positionSec: Number(d.positionSec) || 0,
+            paused: Boolean(d.paused),
+            playbackRate: Number(d.playbackRate) || 1,
+          });
+        }
+      }
+    };
+
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [
+    activePlayer,
+    activeAvailableChannels,
+    getLiveRoomPositionSec,
+    isRoomConnected,
+    switchPlayerChannel,
+    syncPlaybackToExternalRoom,
+    syncedMedia,
+    syncedPlayback,
+  ]);
+
+  // 6. Subscribe to incoming remote playback updates (play, pause, seek/adiantar) from external room
+  useEffect(() => {
+    if (!activePlayer || !isRoomConnected) return;
+
+    return subscribeRemotePlayback((playback, liveSec) => {
+      if (iframeRef.current?.contentWindow) {
+        const command =
+          playback.action === 'seek'
+            ? 'seek'
+            : playback.paused
+            ? 'pause'
+            : 'play';
+        iframeRef.current.contentWindow.postMessage(
+          {
+            type: 'LOVEFLIX_PLAYER_COMMAND',
+            command,
+            positionSec: liveSec,
+            paused: playback.paused,
+            playbackRate: playback.playbackRate || 1,
+          },
+          '*'
+        );
+      }
+
+      const mins = Math.floor(liveSec / 60);
+      const secs = String(Math.floor(liveSec % 60)).padStart(2, '0');
+      const stamp = `${mins}:${secs}`;
+      const label =
+        playback.action === 'pause'
+          ? `Sala pausou em ${stamp}`
+          : playback.action === 'seek'
+          ? `Sala sincronizou tempo para ${stamp}`
+          : playback.action === 'play'
+          ? `Sala retomou em ${stamp}`
+          : null;
+
+      if (label) {
+        setRemoteSyncNotice(label);
+        if (remoteNoticeTimerRef.current) clearTimeout(remoteNoticeTimerRef.current);
+        remoteNoticeTimerRef.current = setTimeout(() => {
+          setRemoteSyncNotice(null);
+        }, 2400);
+      }
+    });
+  }, [activePlayer, isRoomConnected, subscribeRemotePlayback]);
+
+  // 7. Automatically push local active player media/channel changes to connected external room
+  useEffect(() => {
+    if (!activePlayer || !isRoomConnected || isApplyingRemoteMediaChange()) return;
+
+    void syncMediaToExternalRoom({
+      mediaType: activePlayer.mediaType,
+      tmdbId: activePlayer.id,
+      imdbId: activePlayer.imdbId,
+      title: activePlayer.title,
+      season: activePlayer.season,
+      episode: activePlayer.episode,
+      episodeTitle: activePlayer.episodeTitle,
+      channel: activePlayer.channel,
+    });
+  }, [
+    activePlayer?.id,
+    activePlayer?.mediaType,
+    activePlayer?.imdbId,
+    activePlayer?.season,
+    activePlayer?.episode,
+    activePlayer?.channel,
+    isRoomConnected,
+    isApplyingRemoteMediaChange,
+    syncMediaToExternalRoom,
+  ]);
+
+  // Track iframe loading spinner whenever channel or episode changes
+  useEffect(() => {
+    if (activePlayer && !resolvingActiveImdb) {
       setIframeLoading(true);
     } else {
       setIframeLoading(false);
     }
   }, [
+    activePlayer?.id,
     activePlayer?.imdbId,
     activePlayer?.channel,
     activePlayer?.season,
     activePlayer?.episode,
+    resolvingActiveImdb,
   ]);
 
   // Track browser native fullscreen changes and body scroll lock
@@ -198,28 +443,65 @@ export const StreamingPlayerModal: React.FC = () => {
     }
   };
 
-  const handleSelectChannel = (channel: 1 | 2 | 3) => {
-    if (!watchRequest) return;
+  const handleSelectChannel = async (channel: 1 | 2 | 3) => {
+    if (!watchRequest || sendingToRoom) return;
     const resolvedImdb =
       (watchRequest.imdbId && /^tt\d+/i.test(watchRequest.imdbId) ? watchRequest.imdbId : null) ||
       prefetchedImdb ||
       null;
 
-    // Commit activePlayer synchronously so playerScreenRef mounts inside the exact user click gesture
+    const effectiveChannel =
+      modalAvailableChannels &&
+      modalAvailableChannels.length > 0 &&
+      !modalAvailableChannels.includes(channel)
+        ? modalAvailableChannels[0]
+        : channel;
+
+    // When Love Flix is opened inside the external platform's room as a content picker,
+    // dispatch the selected movie/episode/channel directly to the room and close the modal cleanly.
+    if (isRoomConnected && isPickerMode) {
+      setSendingToRoom(true);
+      const sent = await syncMediaToExternalRoom({
+        mediaType: watchRequest.mediaType,
+        tmdbId: watchRequest.id,
+        imdbId: resolvedImdb,
+        title: watchRequest.title,
+        posterPath: watchRequest.item?.poster_path || null,
+        backdropPath: watchRequest.item?.backdrop_path || null,
+        season: watchRequest.mediaType === 'tv' ? watchRequest.season || 1 : undefined,
+        episode: watchRequest.mediaType === 'tv' ? watchRequest.episode || 1 : undefined,
+        episodeTitle: watchRequest.episodeTitle,
+        channel: effectiveChannel,
+      });
+      setSendingToRoom(false);
+
+      if (sent) {
+        pushToast(`Iniciando na sala: ${watchRequest.title}`, 'accent');
+        closeWatchModal();
+        if (returnUrl) {
+          returnToExternalRoomApp();
+        }
+        return;
+      }
+    }
+
+    if (modalAvailableChannels) {
+      setActiveAvailableChannels(modalAvailableChannels);
+    }
+
     flushSync(() => {
       startPlayerSession({
         mediaType: watchRequest.mediaType,
         id: watchRequest.id,
         title: watchRequest.title,
         imdbId: resolvedImdb,
-        channel,
+        channel: effectiveChannel,
         season: watchRequest.mediaType === 'tv' ? watchRequest.season || 1 : undefined,
         episode: watchRequest.mediaType === 'tv' ? watchRequest.episode || 1 : undefined,
         episodeTitle: watchRequest.episodeTitle,
       });
     });
 
-    // Automatically launch true fullscreen inside our site
     enterFullscreenElement(playerScreenRef.current);
   };
 
@@ -252,7 +534,7 @@ export const StreamingPlayerModal: React.FC = () => {
       streamParams.set('episode', String(activePlayer.episode || 1));
     }
 
-    const streamSrc = activePlayer.imdbId
+    const streamSrc = !resolvingActiveImdb
       ? `/api/supercdn/stream?${streamParams.toString()}`
       : null;
 
@@ -263,6 +545,14 @@ export const StreamingPlayerModal: React.FC = () => {
           }`
         : null;
 
+    const headerChannels =
+      activeAvailableChannels && activeAvailableChannels.length > 0
+        ? CHANNELS.filter((ch) => activeAvailableChannels.includes(ch.id))
+        : CHANNELS;
+
+    const noPlayerChannelsAvailable =
+      activeAvailableChannels !== null && activeAvailableChannels.length === 0;
+
     return (
       <div
         ref={playerScreenRef}
@@ -271,7 +561,7 @@ export const StreamingPlayerModal: React.FC = () => {
         aria-modal="true"
         aria-label={`Reproduzindo ${activePlayer.title}`}
       >
-        {/* Slim Cinema Control Header (never overlaps embedded player controls) */}
+        {/* Slim Cinema Control Header */}
         <header className="h-12 px-3 sm:px-5 bg-[#080808] border-b border-white/[0.08] flex items-center justify-between gap-3 shrink-0 z-20">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -294,25 +584,27 @@ export const StreamingPlayerModal: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-[#121212] border border-white/[0.08]">
-              {CHANNELS.map((ch) => {
-                const isSelected = activePlayer.channel === ch.id;
-                return (
-                  <button
-                    key={ch.id}
-                    type="button"
-                    onClick={() => switchPlayerChannel(ch.id)}
-                    className={`px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
-                      isSelected
-                        ? 'bg-[#E50914] text-white'
-                        : 'text-[#A1A1A1] hover:text-white hover:bg-white/[0.06]'
-                    }`}
-                  >
-                    {ch.label}
-                  </button>
-                );
-              })}
-            </div>
+            {!noPlayerChannelsAvailable && (
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-[#121212] border border-white/[0.08]">
+                {headerChannels.map((ch) => {
+                  const isSelected = activePlayer.channel === ch.id;
+                  return (
+                    <button
+                      key={ch.id}
+                      type="button"
+                      onClick={() => switchPlayerChannel(ch.id)}
+                      className={`px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                        isSelected
+                          ? 'bg-[#E50914] text-white'
+                          : 'text-[#A1A1A1] hover:text-white hover:bg-white/[0.06]'
+                      }`}
+                    >
+                      {ch.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             <button
               type="button"
@@ -335,7 +627,7 @@ export const StreamingPlayerModal: React.FC = () => {
           id="SuperCDNContainerVideo"
           className="relative flex-1 w-full h-full min-h-0 bg-black overflow-hidden"
         >
-          {(!activePlayer.imdbId && !imdbLookupFailed) || iframeLoading ? (
+          {(resolvingActiveImdb || iframeLoading) && !noPlayerChannelsAvailable ? (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[#080808] pointer-events-none">
               <Loader2 className="w-9 h-9 animate-spin text-[#E50914]" />
               <p className="text-xs sm:text-sm font-semibold text-[#A1A1A1]">
@@ -344,14 +636,20 @@ export const StreamingPlayerModal: React.FC = () => {
             </div>
           ) : null}
 
-          {imdbLookupFailed && !activePlayer.imdbId ? (
+          {remoteSyncNotice && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-lg bg-[#121212]/90 border border-[#E50914]/40 text-xs font-bold text-white shadow-xl pointer-events-none tabular-nums">
+              {remoteSyncNotice}
+            </div>
+          )}
+
+          {noPlayerChannelsAvailable ? (
             <div className="w-full h-full flex items-center justify-center p-6 text-center bg-[#080808]">
               <div className="max-w-md rounded-2xl bg-[#121212] border border-white/10 p-7">
                 <p className="text-base font-bold text-white mb-2">
-                  Conteúdo sem código IMDb vinculado
+                  Transmissão indisponível no momento
                 </p>
                 <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed mb-5">
-                  Este título ainda não possui identificador IMDb disponível para iniciar a reprodução nos canais.
+                  Este título ou episódio ainda não está disponível em nenhum dos servidores de transmissão.
                 </p>
                 <button
                   type="button"
@@ -364,7 +662,8 @@ export const StreamingPlayerModal: React.FC = () => {
             </div>
           ) : streamSrc ? (
             <iframe
-              key={`${activePlayer.imdbId}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`}
+              ref={iframeRef}
+              key={`${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`}
               src={streamSrc}
               title={`${activePlayer.title} — Canal ${activePlayer.channel}`}
               width="100%"
@@ -383,7 +682,7 @@ export const StreamingPlayerModal: React.FC = () => {
   }
 
   // ==========================================================================
-  // 2. COMPACT 3-CHANNEL SELECTOR CARD (Canal 1, Canal 2, Canal 3)
+  // 2. SMART CHANNEL SELECTOR CARD (Shows Verified Working Channels)
   // ==========================================================================
   if (!watchRequest) return null;
 
@@ -392,6 +691,22 @@ export const StreamingPlayerModal: React.FC = () => {
     isSeries && watchRequest.season && watchRequest.episode
       ? `Temporada ${watchRequest.season} · Episódio ${watchRequest.episode}`
       : null;
+
+  const isChecking = resolvingImdb || checkingModalChannels;
+  const noChannelsAvailable =
+    modalAvailableChannels !== null && modalAvailableChannels.length === 0;
+  const visibleModalChannels =
+    modalAvailableChannels && modalAvailableChannels.length > 0
+      ? CHANNELS.filter((ch) => modalAvailableChannels.includes(ch.id))
+      : CHANNELS;
+
+  const availabilitySubtitle = isChecking
+    ? 'Verificando disponibilidade nos canais...'
+    : modalAvailableChannels && modalAvailableChannels.length > 0 && modalAvailableChannels.length < 3
+    ? modalAvailableChannels.length === 1
+      ? '1 canal disponível para este título'
+      : `${modalAvailableChannels.length} canais disponíveis para este título`
+    : null;
 
   return (
     <div
@@ -419,6 +734,9 @@ export const StreamingPlayerModal: React.FC = () => {
                 {watchRequest.episodeTitle ? ` — ${watchRequest.episodeTitle}` : ''}
               </p>
             )}
+            {availabilitySubtitle && (
+              <p className="text-xs text-[#A1A1A1] mt-1">{availabilitySubtitle}</p>
+            )}
           </div>
 
           <button
@@ -431,35 +749,51 @@ export const StreamingPlayerModal: React.FC = () => {
           </button>
         </div>
 
-        {/* 3 Direct Channel Options */}
-        <div className="space-y-2.5">
-          {CHANNELS.map((ch) => (
+        {/* Verified Channel Options or Clean Unavailable Notice */}
+        {noChannelsAvailable ? (
+          <div className="py-3 text-center space-y-4">
+            <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed">
+              Este título ou episódio ainda não está disponível nos canais de transmissão no momento.
+            </p>
             <button
-              key={ch.id}
               type="button"
-              onClick={() => handleSelectChannel(ch.id)}
-              className="group w-full flex items-center justify-between px-4 py-3.5 rounded-xl bg-[#181818] hover:bg-[#E50914] border border-white/10 hover:border-[#FF253A] text-white transition-all duration-150 active:scale-[0.99] cursor-pointer min-h-[48px]"
+              onClick={closeWatchModal}
+              className="w-full py-3 rounded-xl bg-[#1b1b1b] hover:bg-[#E50914] text-xs font-bold text-white border border-white/10 transition-colors cursor-pointer"
             >
-              <span className="inline-flex items-center gap-3">
-                <span className="w-8 h-8 rounded-lg bg-[#E50914]/15 group-hover:bg-white/20 flex items-center justify-center text-[#FF253A] group-hover:text-white transition-colors">
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                </span>
-                <span className="text-sm font-bold tracking-wide">{ch.label}</span>
-              </span>
-
-              <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#A1A1A1] group-hover:text-white transition-colors">
-                {resolvingImdb ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <>
-                    <span>Assistir</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </>
-                )}
-              </span>
+              Voltar
             </button>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {visibleModalChannels.map((ch) => (
+              <button
+                key={ch.id}
+                type="button"
+                disabled={sendingToRoom}
+                onClick={() => void handleSelectChannel(ch.id)}
+                className="group w-full flex items-center justify-between px-4 py-3.5 rounded-xl bg-[#181818] hover:bg-[#E50914] border border-white/10 hover:border-[#FF253A] text-white transition-all duration-150 active:scale-[0.99] cursor-pointer min-h-[48px] disabled:opacity-60"
+              >
+                <span className="inline-flex items-center gap-3">
+                  <span className="w-8 h-8 rounded-lg bg-[#E50914]/15 group-hover:bg-white/20 flex items-center justify-center text-[#FF253A] group-hover:text-white transition-colors">
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                  </span>
+                  <span className="text-sm font-bold tracking-wide">{ch.label}</span>
+                </span>
+
+                <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#A1A1A1] group-hover:text-white transition-colors">
+                  {(isChecking && modalAvailableChannels === null) || sendingToRoom ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <>
+                      <span>Assistir</span>
+                      <ChevronRight className="w-4 h-4" />
+                    </>
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

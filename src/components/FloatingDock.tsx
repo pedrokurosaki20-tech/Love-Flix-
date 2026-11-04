@@ -51,10 +51,10 @@ export const FloatingDock: React.FC = () => {
   ];
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none flex justify-center px-4 pb-[max(0.9rem,env(safe-area-inset-bottom))]">
+    <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none flex justify-center px-3 sm:px-4 pb-[max(0.9rem,env(safe-area-inset-bottom))]">
       <nav
         aria-label="Navegação principal"
-        className="pointer-events-auto inline-flex items-center gap-1.5 p-1.5 rounded-full bg-[#111111]/92 backdrop-blur-xl border border-white/[0.11] shadow-[0_14px_38px_rgba(0,0,0,0.85)]"
+        className="pointer-events-auto inline-flex items-center gap-1 sm:gap-1.5 p-1.5 rounded-full bg-[#111111]/92 backdrop-blur-xl border border-white/[0.11] shadow-[0_14px_38px_rgba(0,0,0,0.85)]"
       >
         {dockItems.map((item) => {
           const Icon = item.icon;
@@ -63,7 +63,7 @@ export const FloatingDock: React.FC = () => {
               key={item.id}
               type="button"
               onClick={() => navigateToPage(item.id)}
-              className={`relative flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-2 min-w-[84px] sm:min-w-[112px] h-12 sm:h-11 px-4 rounded-full transition-colors duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] ${
+              className={`relative flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-2 min-w-[74px] sm:min-w-[108px] h-12 sm:h-11 px-3 sm:px-4 rounded-full transition-colors duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] ${
                 item.isActive ? 'text-white' : 'text-[#A1A1A1] hover:text-white'
               }`}
             >

@@ -397,7 +397,7 @@ export const tmdbService = {
     return this.discoverTV(baseFilters, extraParams);
   },
 
-  // Dedicated Dorama fetcher (Asian live-action dramas without animation/reality/news)
+  // Dedicated Dorama fetcher (curated against real multi-channel streaming availability)
   async discoverDoramas(
     filters: DiscoverFilterParams = {},
     extraParams: Record<string, string | number | undefined> = {}
@@ -408,7 +408,143 @@ export const tmdbService = {
       withoutGenres: '16,99,10763,10764,10767',
       genre: filters.genre || '18',
     };
-    return this.discoverTV(baseFilters, extraParams);
+
+    const queryParams = new URLSearchParams();
+    queryParams.set('sort_by', baseFilters.sortBy || 'popularity.desc');
+    queryParams.set('page', String(baseFilters.page || 1));
+    if (baseFilters.genre) queryParams.set('with_genres', baseFilters.genre);
+    if (baseFilters.withoutGenres) queryParams.set('without_genres', baseFilters.withoutGenres);
+    if (baseFilters.year) queryParams.set('first_air_date_year', baseFilters.year);
+    if (baseFilters.decade) {
+      const dec = DECADES_LIST.find((d) => d.value === baseFilters.decade);
+      if (dec) {
+        queryParams.set('first_air_date.gte', dec.start);
+        queryParams.set('first_air_date.lte', dec.end);
+      }
+    }
+    if (baseFilters.minRating) {
+      queryParams.set('vote_average.gte', baseFilters.minRating);
+      if (!baseFilters.minVotes && !extraParams['vote_count.gte']) {
+        queryParams.set('vote_count.gte', '80');
+      }
+    }
+    if (baseFilters.minVotes) queryParams.set('vote_count.gte', baseFilters.minVotes);
+    if (baseFilters.language) queryParams.set('with_original_language', baseFilters.language);
+    if (baseFilters.country) queryParams.set('with_origin_country', baseFilters.country);
+    if (baseFilters.status) queryParams.set('with_status', baseFilters.status);
+
+    for (const [k, v] of Object.entries(extraParams)) {
+      if (v !== undefined && v !== null && String(v) !== '') {
+        queryParams.set(k, String(v));
+      }
+    }
+
+    if (queryParams.get('sort_by') === 'vote_average.desc' && !queryParams.has('vote_count.gte')) {
+      queryParams.set('vote_count.gte', '200');
+    }
+
+    const url = `/api/supercdn/doramas?${queryParams.toString()}`;
+    const cached = clientCache.get(url);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data as TMDBPaginatedResponse<TMDBMediaItem>;
+    }
+
+    const existing = inFlightRequests.get(url);
+    if (existing) {
+      return existing as Promise<TMDBPaginatedResponse<TMDBMediaItem>>;
+    }
+
+    const reqPromise = (async (): Promise<TMDBPaginatedResponse<TMDBMediaItem>> => {
+      try {
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error('Curated doramas unavailable');
+        const json = (await res.json()) as TMDBPaginatedResponse<TMDBMediaItem>;
+        const tagged = tagMediaType(json, 'tv');
+        clientCache.set(url, { data: tagged, expiresAt: Date.now() + CLIENT_CACHE_TTL });
+        return tagged;
+      } catch {
+        return this.discoverTV(baseFilters, extraParams);
+      } finally {
+        inFlightRequests.delete(url);
+      }
+    })();
+
+    inFlightRequests.set(url, reqPromise);
+    return reqPromise;
+  },
+
+  // Real-time 3-channel availability check + Canal 1 pre-warm
+  async getChannelAvailability(params: {
+    mediaType: 'movie' | 'tv';
+    id: number;
+    imdbId?: string | null;
+    season?: number;
+    episode?: number;
+  }): Promise<{
+    availableChannels: Array<1 | 2 | 3>;
+    recommendedChannel: 1 | 2 | 3 | null;
+  }> {
+    const search = new URLSearchParams({
+      type: params.mediaType === 'tv' ? 'tvshow' : 'movie',
+      tmdbId: String(params.id),
+    });
+    if (params.imdbId && /^tt\d+/i.test(params.imdbId)) {
+      search.set('imdb', params.imdbId);
+    }
+    if (params.mediaType === 'tv') {
+      search.set('season', String(params.season || 1));
+      search.set('episode', String(params.episode || 1));
+    }
+
+    const url = `/api/supercdn/availability?${search.toString()}`;
+    const cached = clientCache.get(url);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data as {
+        availableChannels: Array<1 | 2 | 3>;
+        recommendedChannel: 1 | 2 | 3 | null;
+      };
+    }
+
+    const existing = inFlightRequests.get(url);
+    if (existing) {
+      return existing as Promise<{
+        availableChannels: Array<1 | 2 | 3>;
+        recommendedChannel: 1 | 2 | 3 | null;
+      }>;
+    }
+
+    const reqPromise = (async () => {
+      try {
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error('Availability check failed');
+        const data = (await res.json()) as {
+          availableChannels?: Array<1 | 2 | 3>;
+          recommendedChannel?: 1 | 2 | 3 | null;
+        };
+        const result = {
+          availableChannels: Array.isArray(data.availableChannels)
+            ? data.availableChannels
+            : ([1, 2, 3] as Array<1 | 2 | 3>),
+          recommendedChannel:
+            data.recommendedChannel !== undefined ? data.recommendedChannel : 1,
+        };
+        clientCache.set(url, {
+          data: result,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        });
+        return result;
+      } catch {
+        return {
+          availableChannels: [1, 2, 3] as Array<1 | 2 | 3>,
+          recommendedChannel: 1 as const,
+        };
+      } finally {
+        inFlightRequests.delete(url);
+      }
+    })();
+
+    inFlightRequests.set(url, reqPromise);
+    return reqPromise;
   },
 
   // Full Movie Details (including credits, videos, recommendations, similar, release_dates, external_ids)
