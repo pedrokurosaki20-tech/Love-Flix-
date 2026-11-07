@@ -142,6 +142,48 @@ function isStreamBetterProvider(host: string): boolean {
   return host.includes('streambetter');
 }
 
+let cachedSuperCdnCookie: { cookie: string; expiresAt: number } | null = null;
+let inFlightCookieFetch: Promise<string> | null = null;
+
+async function getSuperCdnCookie(): Promise<string> {
+  if (cachedSuperCdnCookie && cachedSuperCdnCookie.expiresAt > Date.now()) {
+    return cachedSuperCdnCookie.cookie;
+  }
+  if (inFlightCookieFetch) {
+    return inFlightCookieFetch;
+  }
+
+  inFlightCookieFetch = (async () => {
+    try {
+      const res = await fetch(`${SUPERCDN_BASE_URL}/`, {
+        method: 'GET',
+        headers: {
+          'User-Agent': BROWSER_USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+      const cookie = extractCookieHeader(res.headers);
+      if (cookie) {
+        cachedSuperCdnCookie = {
+          cookie,
+          expiresAt: Date.now() + 30 * 60 * 1000,
+        };
+        return cookie;
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  })();
+
+  try {
+    return await inFlightCookieFetch;
+  } finally {
+    inFlightCookieFetch = null;
+  }
+}
+
 async function resolveAllTitleProviders(params: {
   type: 'movie' | 'tvshow';
   imdb: string;
@@ -174,6 +216,7 @@ async function resolveAllTitleProviders(params: {
       const pageTimeout = setTimeout(() => pageController.abort(), 9000);
 
       try {
+        const sessionCookie = await getSuperCdnCookie();
         const pageRes = await fetch(superCdnPageUrl, {
           method: 'GET',
           headers: {
@@ -181,11 +224,13 @@ async function resolveAllTitleProviders(params: {
             'User-Agent': BROWSER_USER_AGENT,
             Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            ...(sessionCookie ? { Cookie: sessionCookie } : {}),
           },
           signal: pageController.signal,
         });
         pageOk = pageRes.ok;
-        cookieHeader = extractCookieHeader(pageRes.headers);
+        const respCookies = extractCookieHeader(pageRes.headers);
+        cookieHeader = respCookies || sessionCookie;
         html = pageRes.ok ? await pageRes.text() : '';
       } catch {
         pageOk = false;
@@ -216,7 +261,7 @@ async function resolveAllTitleProviders(params: {
       }
 
       const itemRegex =
-        /<div[^>]*class="[^"]*player_select_item[^"]*"[^>]*data-id="(\d+)"[^>]*>|<div[^>]*data-id="(\d+)"[^>]*class="[^"]*player_select_item[^"]*"[^>]*>/gi;
+        /<div[^>]*class="[^"]*player_select_item[^"]*"[^>]*data-id="([^"]+)"|<div[^>]*data-id="([^"]+)"[^>]*class="[^"]*player_select_item[^"]*"/gi;
 
       for (const block of dubGroups) {
         for (const m of block.matchAll(itemRegex)) {
@@ -230,6 +275,12 @@ async function resolveAllTitleProviders(params: {
       }
       for (const m of html.matchAll(itemRegex)) {
         pushCandidate(m[1] || m[2] || '', true);
+      }
+      for (const m of html.matchAll(/data-id="([^"]+)"/gi)) {
+        const rawId = m[1];
+        if (rawId && (rawId.startsWith('dyn:') || /^\d+$/.test(rawId))) {
+          pushCandidate(rawId, true);
+        }
       }
 
       if (candidates.length === 0 && type === 'tvshow') {
@@ -341,7 +392,28 @@ async function resolveAllTitleProviders(params: {
 
     // Deterministic Channel Assignment:
     // Canal 1 -> Native SuperCDN / FirePlayer HLS
-    const slot1 = resolvedOptions.find((o) => isNativeCdnProvider(o.url, o.host)) || null;
+    let slot1 = resolvedOptions.find((o) => isNativeCdnProvider(o.url, o.host)) || null;
+    if (!slot1) {
+      if (type === 'movie' && (hasValidImdb || tmdbId)) {
+        const movieRef = hasValidImdb ? imdb : tmdbId;
+        slot1 = {
+          videoId: 'fallback-vaiquecol',
+          url: `https://vaiquecol.com/embed2/${movieRef}`,
+          captionUrl: null,
+          host: 'vaiquecol.com',
+          isDublado: true,
+        };
+      } else if (type === 'tvshow' && (tmdbId || hasValidImdb)) {
+        const seriesRef = tmdbId || imdb;
+        slot1 = {
+          videoId: 'fallback-vaiquecol',
+          url: `https://vaiquecol.com/embed2/${seriesRef}-${season}-${episode}`,
+          captionUrl: null,
+          host: 'vaiquecol.com',
+          isDublado: true,
+        };
+      }
+    }
 
     // Canal 2 -> Always SuperFlix
     const superFlixOption = resolvedOptions.find((o) => isSuperFlixProvider(o.host));
@@ -659,16 +731,15 @@ export async function resolveSuperCdnChannel(params: {
         }
       }
 
-      return {
-        kind: 'html',
-        available: false,
+      const fallbackEntry: SuperCdnResolvedEntry = {
+        kind: 'redirect',
+        available: true,
         resolvedChannel: 1,
-        html: renderStatusHtml(
-          'Canal 1 indisponível para este título',
-          'Toque em outro canal disponível no topo da tela para assistir imediatamente.'
-        ),
-        expiresAt: Date.now() + 30 * 1000,
+        url: resolvedStreamUrl,
+        expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
       };
+      superCdnStreamCache.set(cacheKey, fallbackEntry);
+      return fallbackEntry;
     }
 
     const entry: SuperCdnResolvedEntry = {

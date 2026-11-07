@@ -167,8 +167,8 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               title={inList ? 'Na Minha Lista' : 'Adicionar à Minha Lista'}
               className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors cursor-pointer ${
                 inList
-                  ? 'bg-[#E50914]/25 border-[#E50914] text-[#FF253A]'
-                  : 'bg-black/70 hover:bg-white/15 border-white/20 text-white'
+                  ? 'bg-white/20 border-white/40 text-white'
+                  : 'bg-black/70 hover:bg-white/15 border-white/20 text-white/80 hover:text-white'
               }`}
             >
               {inList ? <Check className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
@@ -184,11 +184,11 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               title={fav ? 'Favorito' : 'Favoritar'}
               className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors cursor-pointer ${
                 fav
-                  ? 'bg-[#E50914]/25 border-[#E50914] text-[#FF253A]'
-                  : 'bg-black/70 hover:bg-white/15 border-white/20 text-white'
+                  ? 'bg-white/20 border-white/40 text-white'
+                  : 'bg-black/70 hover:bg-white/15 border-white/20 text-white/80 hover:text-white'
               }`}
             >
-              <Heart className={`w-3.5 h-3.5 ${fav ? 'fill-current' : ''}`} />
+              <Heart className={`w-3.5 h-3.5 ${fav ? 'fill-white text-white' : ''}`} />
             </button>
           </div>
         </div>

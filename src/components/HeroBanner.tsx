@@ -198,60 +198,63 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
           )}
 
           {/* Action Buttons */}
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => playTrailerForItem(current)}
-              className="inline-flex items-center justify-center gap-2.5 px-6 py-3 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-white text-sm font-bold shadow-lg shadow-[#E50914]/25 transition-all duration-150 active:scale-[0.98] whitespace-nowrap shrink-0 min-h-[44px] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-            >
-              <Play className="w-4 h-4 fill-current" />
-              <span>Assistir</span>
-            </button>
+          <div className="w-full max-w-xl">
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-2.5 sm:gap-3">
+              <button
+                type="button"
+                onClick={() => playTrailerForItem(current)}
+                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white hover:bg-white/90 text-black text-sm font-extrabold shadow-xl transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white shrink-0 sm:shrink min-h-[46px]"
+              >
+                <Play className="w-4 h-4 fill-black text-black" />
+                <span>Assistir</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={() => openMediaDetail(current)}
-              className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white/12 hover:bg-white/20 backdrop-blur-md text-white text-sm font-bold border border-white/15 transition-all duration-150 active:scale-[0.98] whitespace-nowrap shrink-0 min-h-[44px] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914]"
-            >
-              <Info className="w-4 h-4" />
-              <span>Mais informações</span>
-            </button>
+              <button
+                type="button"
+                onClick={() => openMediaDetail(current)}
+                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white/15 hover:bg-white/25 backdrop-blur-md text-white text-sm font-bold border border-white/20 transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] shrink-0 sm:shrink min-h-[46px]"
+              >
+                <Info className="w-4 h-4" />
+                <span>Mais detalhes</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={() => toggleMyList(current)}
-              className={`inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border transition-all duration-150 active:scale-[0.98] whitespace-nowrap shrink-0 min-h-[44px] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] ${
-                inList
-                  ? 'bg-[#191919] text-white border-[#E50914]/60'
-                  : 'bg-[#121212]/80 hover:bg-[#1e1e1e] text-white border-white/15'
-              }`}
-            >
-              {inList ? (
-                <>
-                  <Check className="w-4 h-4 text-[#FF253A]" />
-                  <span>Na minha lista</span>
-                </>
-              ) : (
-                <>
-                  <Plus className="w-4 h-4" />
-                  <span>Minha lista</span>
-                </>
-              )}
-            </button>
+              <button
+                type="button"
+                onClick={() => toggleMyList(current)}
+                className={`inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 shrink-0 sm:shrink min-h-[46px] ${
+                  inList
+                    ? 'bg-white/15 hover:bg-white/20 text-white border-white/30 backdrop-blur-md'
+                    : 'bg-black/50 hover:bg-black/70 text-white/80 hover:text-white border-white/15 backdrop-blur-sm'
+                }`}
+              >
+                {inList ? (
+                  <>
+                    <Check className="w-4 h-4 text-white" />
+                    <span>Na lista</span>
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-4 h-4 text-white/80" />
+                    <span>Minha lista</span>
+                  </>
+                )}
+              </button>
 
-            <button
-              type="button"
-              onClick={() => toggleFavorite(current)}
-              aria-label={fav ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
-              title={fav ? 'Remover dos favoritos' : 'Favoritar'}
-              className={`inline-flex items-center justify-center w-11 h-11 rounded-xl border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] ${
-                fav
-                  ? 'bg-[#E50914]/20 border-[#E50914] text-[#FF253A]'
-                  : 'bg-[#121212]/80 hover:bg-[#1e1e1e] border-white/15 text-white'
-              }`}
-            >
-              <Heart className={`w-4 h-4 ${fav ? 'fill-current' : ''}`} />
-            </button>
+              <button
+                type="button"
+                onClick={() => toggleFavorite(current)}
+                aria-label={fav ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+                title={fav ? 'Remover dos favoritos' : 'Favoritar'}
+                className={`inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 shrink-0 sm:shrink min-h-[46px] ${
+                  fav
+                    ? 'bg-white/15 hover:bg-white/20 text-white border-white/30 backdrop-blur-md'
+                    : 'bg-black/50 hover:bg-black/70 border-white/15 text-white/80 hover:text-white backdrop-blur-sm'
+                }`}
+              >
+                <Heart className={`w-4 h-4 ${fav ? 'fill-white text-white' : 'text-white/80'}`} />
+                <span>{fav ? 'Favorito' : 'Favoritar'}</span>
+              </button>
+            </div>
           </div>
         </div>
 

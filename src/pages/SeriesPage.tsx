@@ -1,51 +1,34 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { HeroBanner } from '../components/HeroBanner';
-import { FilterBar } from '../components/FilterBar';
 import { AsyncCarouselRow } from '../components/AsyncCarouselRow';
 import { MediaCard } from '../components/MediaCard';
 import {
   COUNTRIES_LIST,
   TV_GENRES,
-  type DiscoverFilterParams,
   type TMDBMediaItem,
 } from '../types/tmdb';
 import { tmdbService } from '../services/tmdb';
 import { useNavigation } from '../context/NavigationContext';
 
 export const SeriesPage: React.FC = () => {
-  const { route } = useNavigation();
+  const { route, navigate } = useNavigation();
 
   const [heroSeries, setHeroSeries] = useState<TMDBMediaItem[]>([]);
   const [heroLoading, setHeroLoading] = useState(true);
 
-  const [filters, setFilters] = useState<DiscoverFilterParams>(() => ({
-    genre: route.genreId || undefined,
-    sortBy: 'popularity.desc',
-    page: 1,
-  }));
-  const [filteredResults, setFilteredResults] = useState<TMDBMediaItem[]>([]);
-  const [filteredTotalPages, setFilteredTotalPages] = useState(1);
-  const [filteredLoading, setFilteredLoading] = useState(false);
+  // Genre filtered view if navigated via genre tag
+  const [genreResults, setGenreResults] = useState<TMDBMediaItem[]>([]);
+  const [genrePage, setGenrePage] = useState(1);
+  const [genreTotalPages, setGenreTotalPages] = useState(1);
+  const [genreLoading, setGenreLoading] = useState(false);
 
   const [selectedGenreTab, setSelectedGenreTab] = useState<string>('18');
   const [selectedCountryTab, setSelectedCountryTab] = useState<string>('US');
 
-  useEffect(() => {
-    if (route.genreId) {
-      setFilters((prev) => ({ ...prev, genre: route.genreId, page: 1 }));
-    }
-  }, [route.genreId]);
-
-  const hasActiveFilters = Boolean(
-    filters.genre ||
-      filters.year ||
-      filters.decade ||
-      filters.minRating ||
-      filters.country ||
-      filters.status ||
-      (filters.sortBy && filters.sortBy !== 'popularity.desc')
-  );
+  const activeGenre = route.genreId
+    ? TV_GENRES.find((g) => String(g.id) === String(route.genreId))
+    : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -64,31 +47,36 @@ export const SeriesPage: React.FC = () => {
     };
   }, []);
 
+  // Load TV shows when genre is selected from route
   useEffect(() => {
-    if (!hasActiveFilters) return;
+    if (!route.genreId) {
+      setGenreResults([]);
+      setGenrePage(1);
+      return;
+    }
     let cancelled = false;
-    setFilteredLoading(true);
+    setGenreLoading(true);
 
     tmdbService
-      .discoverTV(filters)
+      .discoverTV({ genre: route.genreId, sortBy: 'popularity.desc', page: genrePage })
       .then((res) => {
         if (cancelled) return;
-        setFilteredTotalPages(Math.min(res.total_pages || 1, 500));
-        setFilteredResults((prev) =>
-          (filters.page || 1) === 1 ? res.results : [...prev, ...res.results]
+        setGenreTotalPages(Math.min(res.total_pages || 1, 500));
+        setGenreResults((prev) =>
+          genrePage === 1 ? res.results : [...prev, ...res.results]
         );
       })
       .catch(() => {
-        if (!cancelled && (filters.page || 1) === 1) setFilteredResults([]);
+        if (!cancelled && genrePage === 1) setGenreResults([]);
       })
       .finally(() => {
-        if (!cancelled) setFilteredLoading(false);
+        if (!cancelled) setGenreLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [filters, hasActiveFilters]);
+  }, [route.genreId, genrePage]);
 
   const fetchPopular = useCallback(() => tmdbService.getTVList('popular', 1), []);
   const fetchTrending = useCallback(() => tmdbService.getTrending('tv', 'week', 1), []);
@@ -137,34 +125,34 @@ export const SeriesPage: React.FC = () => {
         sectionKicker="Séries & Produções Episódicas"
       />
 
-      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-6">
-        <div className="mb-4">
-          <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-            Séries
-          </h2>
-        </div>
-
-        <FilterBar
-          filters={filters}
-          onChange={setFilters}
-          onReset={() => setFilters({ sortBy: 'popularity.desc', page: 1 })}
-          genres={TV_GENRES}
-          mediaMode="tv"
-        />
+      {/* Page Title Header */}
+      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-4">
+        <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+          Séries
+        </h2>
       </div>
 
-      {hasActiveFilters ? (
-        <section className="px-4 sm:px-6 lg:px-10 mt-6">
+      {activeGenre ? (
+        <section className="px-4 sm:px-6 lg:px-10 mt-2">
           <div className="flex items-center justify-between mb-5">
-            <h3 className="font-display text-lg sm:text-xl font-bold text-white">
-              Séries Filtradas
-            </h3>
+            <div className="flex items-center gap-3">
+              <h3 className="font-display text-lg sm:text-xl font-bold text-white">
+                Gênero: {activeGenre.name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => navigate({ page: 'series' })}
+                className="text-xs text-[#FF253A] hover:underline cursor-pointer font-semibold"
+              >
+                ✕ Ver todas as séries
+              </button>
+            </div>
             <span className="text-xs font-mono tabular-nums text-[#A1A1A1]">
-              {filteredResults.length} séries exibidas
+              {genreResults.length} séries
             </span>
           </div>
 
-          {filteredLoading && (filters.page || 1) === 1 ? (
+          {genreLoading && genrePage === 1 ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
               {Array.from({ length: 12 }).map((_, idx) => (
                 <div
@@ -173,41 +161,36 @@ export const SeriesPage: React.FC = () => {
                 />
               ))}
             </div>
-          ) : filteredResults.length === 0 ? (
+          ) : genreResults.length === 0 && !genreLoading ? (
             <div className="p-10 rounded-2xl bg-[#121212] border border-white/[0.08] text-center">
               <p className="text-base font-bold text-white mb-1">
-                Nenhuma série corresponde aos filtros aplicados
-              </p>
-              <p className="text-xs sm:text-sm text-[#A1A1A1] mb-4">
-                Tente remover o filtro de situação ou escolher outro país de origem.
+                Nenhuma série encontrada para este gênero
               </p>
               <button
                 type="button"
-                onClick={() => setFilters({ sortBy: 'popularity.desc', page: 1 })}
-                className="px-5 py-2.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white cursor-pointer"
+                onClick={() => navigate({ page: 'series' })}
+                className="mt-3 px-5 py-2.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white cursor-pointer"
               >
-                Limpar filtros
+                Voltar aos destaques
               </button>
             </div>
           ) : (
             <>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-5">
-                {filteredResults.map((tv, idx) => (
+                {genreResults.map((tv, idx) => (
                   <MediaCard key={`${tv.id}-${idx}`} item={tv} />
                 ))}
               </div>
 
-              {(filters.page || 1) < filteredTotalPages && (
+              {genrePage < genreTotalPages && (
                 <div className="mt-8 flex justify-center">
                   <button
                     type="button"
-                    disabled={filteredLoading}
-                    onClick={() =>
-                      setFilters((prev) => ({ ...prev, page: (prev.page || 1) + 1 }))
-                    }
+                    disabled={genreLoading}
+                    onClick={() => setGenrePage((prev) => prev + 1)}
                     className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#181818] hover:bg-[#222222] text-sm font-bold text-white border border-white/12 transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    {filteredLoading && <Loader2 className="w-4 h-4 animate-spin text-[#E50914]" />}
+                    {genreLoading && <Loader2 className="w-4 h-4 animate-spin text-[#E50914]" />}
                     <span>Carregar mais séries</span>
                   </button>
                 </div>

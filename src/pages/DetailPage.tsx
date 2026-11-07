@@ -4,10 +4,12 @@ import {
   Bookmark,
   Check,
   CheckCircle2,
+  Film,
   Heart,
   Layers,
   Loader2,
   Play,
+  Plus,
   Share2,
   Star,
   Tv,
@@ -244,6 +246,13 @@ export const MediaDetailPage: React.FC<{
   const regularSeasons =
     detail.seasons?.filter((s) => s.episode_count > 0) || [];
 
+  const playLabel =
+    trackedHistoryEntry?.trackedSeason && trackedHistoryEntry?.trackedEpisode
+      ? `Continuar: T${trackedHistoryEntry.trackedSeason} · Ep. ${trackedHistoryEntry.trackedEpisode}`
+      : trackedHistoryEntry
+      ? 'Continuar Assistindo'
+      : 'Assistir Agora';
+
   return (
     <div className="pb-14">
       {/* Top Cinematic Backdrop & Poster Header */}
@@ -347,37 +356,8 @@ export const MediaDetailPage: React.FC<{
                 ) : null}
               </div>
 
-              {/* Interactive Genre Links */}
-              {detail.genres && detail.genres.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2">
-                  {detail.genres.map((g) => (
-                    <button
-                      key={g.id}
-                      type="button"
-                      onClick={() =>
-                        navigateToPage(mediaType === 'tv' ? 'series' : 'movies', {
-                          genreId: String(g.id),
-                          genreName: g.name,
-                        })
-                      }
-                      className="px-3 py-1 rounded-lg bg-white/[0.07] hover:bg-[#E50914] text-xs font-semibold text-white transition-colors cursor-pointer"
-                    >
-                      {g.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Complete Synopsis */}
-              <div className="max-w-3xl">
-                <h2 className="text-xs font-bold text-[#A1A1A1] mb-1.5">Sinopse</h2>
-                <p className="text-sm sm:text-base text-white/85 leading-relaxed">
-                  {detail.overview || 'Sinopse em português ainda não disponibilizada pela TMDB para este título.'}
-                </p>
-              </div>
-
-              {/* Action Buttons Bar */}
-              <div className="flex flex-wrap items-center gap-2.5 pt-1">
+              {/* Primary Hero Actions (Big Play Button & Trailer) */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -406,63 +386,157 @@ export const MediaDetailPage: React.FC<{
                       item: detail,
                     });
                   }}
-                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-sm font-bold text-white shadow-lg shadow-[#E50914]/25 transition-all cursor-pointer min-h-[44px]"
+                  className="inline-flex items-center justify-center gap-3 w-full sm:w-auto sm:min-w-[210px] px-8 py-3.5 rounded-xl bg-white hover:bg-white/90 text-black text-sm sm:text-base font-extrabold shadow-xl shadow-white/5 active:scale-[0.99] transition-all cursor-pointer min-h-[48px]"
                 >
-                  <Play className="w-4 h-4 fill-current" />
-                  <span>Assistir</span>
+                  <Play className="w-5 h-5 fill-black text-black shrink-0" />
+                  <span className="truncate">{playLabel}</span>
                 </button>
 
+                {selectedVideo && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const el = document.getElementById('trailer-section');
+                      if (el) {
+                        el.scrollIntoView({ behavior: 'smooth' });
+                      }
+                    }}
+                    className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-3.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-white text-sm font-bold border border-white/12 transition-all cursor-pointer min-h-[48px] active:scale-[0.99]"
+                  >
+                    <Film className="w-4 h-4 text-[#FF253A] shrink-0" />
+                    <span>Assistir Trailer</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Complete Synopsis & Genres */}
+              <div className="max-w-3xl space-y-3">
+                {detail.genres && detail.genres.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {detail.genres.map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        onClick={() =>
+                          navigateToPage(mediaType === 'tv' ? 'series' : 'movies', {
+                            genreId: String(g.id),
+                            genreName: g.name,
+                          })
+                        }
+                        className="px-3 py-1 rounded-lg bg-white/[0.07] hover:bg-[#E50914] text-xs font-semibold text-white transition-colors cursor-pointer"
+                      >
+                        {g.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <p className="text-sm sm:text-base text-white/85 leading-relaxed">
+                  {detail.overview || 'Sinopse em português ainda não disponibilizada pela TMDB para este título.'}
+                </p>
+
+                {/* Cast & Crew Line Summary (Netflix Clean Style) */}
+                {cast.length > 0 && (
+                  <p className="text-xs text-[#A1A1A1] leading-relaxed">
+                    <span className="font-semibold text-white/90">Estrelando: </span>
+                    {cast.slice(0, 5).map((c) => c.name).join(', ')}
+                    {cast.length > 5 ? '... mais' : ''}
+                  </p>
+                )}
+                {(directors.length > 0 || creators.length > 0) && (
+                  <p className="text-xs text-[#A1A1A1] leading-relaxed">
+                    <span className="font-semibold text-white/90">
+                      {mediaType === 'movie' ? 'Direção: ' : 'Criação: '}
+                    </span>
+                    {(mediaType === 'movie' ? directors : creators).slice(0, 3).map((p) => p.name).join(', ')}
+                  </p>
+                )}
+              </div>
+
+              {/* Structured Action Bar (4 Balanced Columns, Never Wraps) */}
+              <div className="grid grid-cols-4 gap-1.5 sm:gap-3 py-2 max-w-sm sm:max-w-md w-full border-t border-b border-white/[0.08]">
+                {/* Minha Lista */}
                 <button
                   type="button"
                   onClick={() => toggleMyList(detail)}
-                  className={`inline-flex items-center gap-2 px-4 py-3 rounded-xl text-xs sm:text-sm font-bold border transition-colors cursor-pointer min-h-[44px] ${
-                    inList
-                      ? 'bg-[#E50914]/20 border-[#E50914] text-white'
-                      : 'bg-[#141414] hover:bg-[#1f1f1f] border-white/15 text-white'
-                  }`}
+                  className="group flex flex-col items-center justify-center py-2 px-1 rounded-xl hover:bg-white/[0.06] active:scale-95 transition-all cursor-pointer min-h-[56px]"
+                  title={inList ? 'Remover da minha lista' : 'Adicionar à minha lista'}
                 >
-                  {inList ? (
-                    <Check className="w-4 h-4 text-[#FF253A]" />
-                  ) : (
-                    <Bookmark className="w-4 h-4" />
-                  )}
-                  <span>{inList ? 'Na Minha Lista' : 'Minha Lista'}</span>
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center transition-colors">
+                    {inList ? (
+                      <Check className="w-5 h-5 text-white" />
+                    ) : (
+                      <Plus className="w-5 h-5 text-white/90 group-hover:text-white" />
+                    )}
+                  </div>
+                  <span
+                    className={`text-[11px] font-semibold tracking-tight text-center truncate max-w-full ${
+                      inList ? 'text-white' : 'text-[#A1A1A1] group-hover:text-white'
+                    }`}
+                  >
+                    {inList ? 'Na lista' : 'Minha lista'}
+                  </span>
                 </button>
 
+                {/* Favoritar */}
                 <button
                   type="button"
                   onClick={() => toggleFavorite(detail)}
-                  className={`inline-flex items-center gap-2 px-4 py-3 rounded-xl text-xs sm:text-sm font-bold border transition-colors cursor-pointer min-h-[44px] ${
-                    fav
-                      ? 'bg-[#E50914]/20 border-[#E50914] text-[#FF253A]'
-                      : 'bg-[#141414] hover:bg-[#1f1f1f] border-white/15 text-white'
-                  }`}
+                  className="group flex flex-col items-center justify-center py-2 px-1 rounded-xl hover:bg-white/[0.06] active:scale-95 transition-all cursor-pointer min-h-[56px]"
+                  title={fav ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
                 >
-                  <Heart className={`w-4 h-4 ${fav ? 'fill-current' : ''}`} />
-                  <span>{fav ? 'Favorito' : 'Favoritar'}</span>
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center transition-colors">
+                    <Heart
+                      className={`w-5 h-5 transition-colors ${
+                        fav ? 'fill-white text-white' : 'text-white/90 group-hover:text-white'
+                      }`}
+                    />
+                  </div>
+                  <span
+                    className={`text-[11px] font-semibold tracking-tight text-center truncate max-w-full ${
+                      fav ? 'text-white' : 'text-[#A1A1A1] group-hover:text-white'
+                    }`}
+                  >
+                    {fav ? 'Favorito' : 'Favoritar'}
+                  </span>
                 </button>
 
+                {/* Assistido */}
                 <button
                   type="button"
                   onClick={() => toggleWatched(detail)}
-                  className={`inline-flex items-center gap-2 px-4 py-3 rounded-xl text-xs sm:text-sm font-bold border transition-colors cursor-pointer min-h-[44px] ${
-                    watchedState
-                      ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
-                      : 'bg-[#141414] hover:bg-[#1f1f1f] border-white/15 text-white'
-                  }`}
+                  className="group flex flex-col items-center justify-center py-2 px-1 rounded-xl hover:bg-white/[0.06] active:scale-95 transition-all cursor-pointer min-h-[56px]"
+                  title={watchedState ? 'Marcar como não assistido' : 'Marcar como assistido'}
                 >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>{watchedState ? 'Assistido' : 'Marcar Assistido'}</span>
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center transition-colors">
+                    <CheckCircle2
+                      className={`w-5 h-5 transition-colors ${
+                        watchedState ? 'fill-white/20 text-white' : 'text-white/90 group-hover:text-white'
+                      }`}
+                    />
+                  </div>
+                  <span
+                    className={`text-[11px] font-semibold tracking-tight text-center truncate max-w-full ${
+                      watchedState ? 'text-white' : 'text-[#A1A1A1] group-hover:text-white'
+                    }`}
+                  >
+                    {watchedState ? 'Assistido' : 'Assistido'}
+                  </span>
                 </button>
 
+                {/* Compartilhar */}
                 <button
                   type="button"
                   onClick={handleShare}
-                  aria-label="Compartilhar conteúdo"
+                  className="group flex flex-col items-center justify-center py-2 px-1 rounded-xl hover:bg-white/[0.06] active:scale-95 transition-all cursor-pointer min-h-[56px]"
                   title="Compartilhar"
-                  className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-[#141414] hover:bg-[#1f1f1f] border border-white/15 text-white transition-colors cursor-pointer"
                 >
-                  <Share2 className="w-4 h-4" />
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center transition-colors">
+                    <Share2 className="w-5 h-5 text-white/90 group-hover:text-white" />
+                  </div>
+                  <span className="text-[11px] font-semibold tracking-tight text-[#A1A1A1] group-hover:text-white text-center truncate max-w-full">
+                    Compartilhar
+                  </span>
                 </button>
               </div>
 
@@ -558,7 +632,7 @@ export const MediaDetailPage: React.FC<{
 
         {/* Embedded Official Trailer Section */}
         {selectedVideo && (
-          <section className="space-y-4">
+          <section id="trailer-section" className="space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h2 className="font-display text-xl sm:text-2xl font-bold text-white">
@@ -758,14 +832,10 @@ export const MediaDetailPage: React.FC<{
                                   episode: ep.episode_number,
                                   title: ep.name,
                                 });
-                                pushToast(
-                                  `Acompanhando T${ep.season_number} · Ep. ${ep.episode_number}`,
-                                  'accent'
-                                );
                               }}
                               className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                                 isTrackedEp
-                                  ? 'bg-[#E50914]/20 border border-[#E50914] text-[#FF253A]'
+                                  ? 'bg-white/15 border border-white/30 text-white font-bold'
                                   : 'bg-[#1a1a1a] hover:bg-[#242424] text-[#A1A1A1] hover:text-white border border-white/10'
                               }`}
                             >

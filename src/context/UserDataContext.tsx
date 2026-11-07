@@ -358,18 +358,13 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ? bucket.myList.filter((x) => !(x.id === entry.id && x.media_type === entry.media_type))
           : [entry, ...bucket.myList],
       }));
-      pushToast(
-        exists ? `"${label}" removido da Minha Lista` : `"${label}" adicionado à Minha Lista`,
-        exists ? 'default' : 'accent'
-      );
     },
-    [activeBucket.myList, updateActiveBucket, pushToast]
+    [activeBucket.myList, updateActiveBucket]
   );
 
   const toggleFavorite = useCallback(
     (item: TMDBMediaItem) => {
       const entry = createSavedEntry(item);
-      const label = entry.title || entry.name || 'Conteúdo';
       const exists = activeBucket.favorites.some(
         (x) => x.id === entry.id && x.media_type === entry.media_type
       );
@@ -379,18 +374,13 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ? bucket.favorites.filter((x) => !(x.id === entry.id && x.media_type === entry.media_type))
           : [entry, ...bucket.favorites],
       }));
-      pushToast(
-        exists ? `"${label}" removido dos Favoritos` : `"${label}" adicionado aos Favoritos`,
-        exists ? 'default' : 'accent'
-      );
     },
-    [activeBucket.favorites, updateActiveBucket, pushToast]
+    [activeBucket.favorites, updateActiveBucket]
   );
 
   const toggleWatchLater = useCallback(
     (item: TMDBMediaItem) => {
       const entry = createSavedEntry(item);
-      const label = entry.title || entry.name || 'Conteúdo';
       const exists = activeBucket.watchLater.some(
         (x) => x.id === entry.id && x.media_type === entry.media_type
       );
@@ -400,17 +390,13 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ? bucket.watchLater.filter((x) => !(x.id === entry.id && x.media_type === entry.media_type))
           : [entry, ...bucket.watchLater],
       }));
-      pushToast(
-        exists ? `"${label}" removido de Assistir Depois` : `"${label}" salvo em Assistir Depois`
-      );
     },
-    [activeBucket.watchLater, updateActiveBucket, pushToast]
+    [activeBucket.watchLater, updateActiveBucket]
   );
 
   const toggleWatched = useCallback(
     (item: TMDBMediaItem) => {
       const entry = createSavedEntry(item);
-      const label = entry.title || entry.name || 'Conteúdo';
       const exists = activeBucket.watched.some(
         (x) => x.id === entry.id && x.media_type === entry.media_type
       );
@@ -425,9 +411,8 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             : h
         ),
       }));
-      pushToast(exists ? `"${label}" desmarcado como assistido` : `"${label}" marcado como assistido`);
     },
-    [activeBucket.watched, updateActiveBucket, pushToast]
+    [activeBucket.watched, updateActiveBucket]
   );
 
   const recordHistoryVisit = useCallback(

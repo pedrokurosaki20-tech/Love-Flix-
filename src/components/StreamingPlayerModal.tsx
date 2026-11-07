@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import {
   ArrowLeft,
@@ -7,7 +7,10 @@ import {
   Maximize2,
   Minimize2,
   Play,
+  SkipForward,
   Tv,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import { useNavigation } from '../context/NavigationContext';
@@ -15,6 +18,8 @@ import { useExternalRoom } from '../context/ExternalRoomContext';
 import { useUserData } from '../context/UserDataContext';
 import { tmdbService } from '../services/tmdb';
 import type { ExternalPlaybackAction } from '../types/externalRoom';
+
+const OFFICIAL_LOVEFLIX_INTRO_VIDEO = '/assets/aistudio/lv_0_20261031073011_3b9bb1a5.mp4';
 
 const CHANNELS: Array<{ id: 1 | 2 | 3; label: string }> = [
   { id: 1, label: 'Canal 1' },
@@ -72,6 +77,87 @@ export const StreamingPlayerModal: React.FC = () => {
   const playerScreenRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Official Love Flix Opening Intro State
+  const [isPlayingIntro, setIsPlayingIntro] = useState(false);
+  const [introTimeRemaining, setIntroTimeRemaining] = useState(8);
+  const [isIntroMuted, setIsIntroMuted] = useState(false);
+  const introVideoRef = useRef<HTMLVideoElement | null>(null);
+  const lastIntroContentKeyRef = useRef<string | null>(null);
+
+  const handleEndIntro = useCallback(() => {
+    if (introVideoRef.current) {
+      try {
+        introVideoRef.current.pause();
+      } catch {
+        // ignore
+      }
+    }
+    setIsPlayingIntro(false);
+  }, []);
+
+  const toggleIntroSound = useCallback(() => {
+    if (introVideoRef.current) {
+      const nextMuted = !introVideoRef.current.muted;
+      introVideoRef.current.muted = nextMuted;
+      setIsIntroMuted(nextMuted);
+      if (!nextMuted) {
+        introVideoRef.current.volume = 1;
+      }
+    }
+  }, []);
+
+  // Track media changes to trigger the official opening once per title / episode
+  useEffect(() => {
+    if (!activePlayer) {
+      lastIntroContentKeyRef.current = null;
+      setIsPlayingIntro(false);
+      return;
+    }
+
+    const contentKey = `${activePlayer.mediaType}-${activePlayer.id}-${activePlayer.season || 0}-${activePlayer.episode || 0}`;
+    if (lastIntroContentKeyRef.current !== contentKey) {
+      lastIntroContentKeyRef.current = contentKey;
+      setIsPlayingIntro(true);
+      setIntroTimeRemaining(8);
+      setIsIntroMuted(false);
+    }
+  }, [activePlayer?.id, activePlayer?.mediaType, activePlayer?.season, activePlayer?.episode]);
+
+  // Autoplay intro video with full audio upon launch
+  useEffect(() => {
+    if (!isPlayingIntro || !activePlayer) return;
+
+    const video = introVideoRef.current;
+    if (!video) return;
+
+    video.currentTime = 0;
+    video.volume = 1;
+    video.muted = false;
+
+    const playPromise = video.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(() => {
+        // If the browser enforces initial user muted policy, fallback gracefully
+        video.muted = true;
+        setIsIntroMuted(true);
+        video.play().catch(() => {});
+      });
+    }
+  }, [isPlayingIntro, activePlayer?.id, activePlayer?.season, activePlayer?.episode]);
+
+  // Space/Enter shortcut to skip the intro
+  useEffect(() => {
+    if (!activePlayer || !isPlayingIntro) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        handleEndIntro();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activePlayer, isPlayingIntro, handleEndIntro]);
 
   // 1. Resolve IMDb ID as soon as the 3-channel selector card opens
   useEffect(() => {
@@ -182,7 +268,7 @@ export const StreamingPlayerModal: React.FC = () => {
     };
   }, [activePlayer?.id, activePlayer?.mediaType, activePlayer?.imdbId, updateActivePlayerImdb]);
 
-  // 4. Stage 2 & Stage 3: Verify channels for activePlayer and auto-switch if current channel is unavailable
+  // 4. Stage 2: Verify channels in background for fallback intelligence
   useEffect(() => {
     if (!activePlayer || resolvingActiveImdb) return;
 
@@ -199,13 +285,6 @@ export const StreamingPlayerModal: React.FC = () => {
       .then((info) => {
         if (cancelled) return;
         setActiveAvailableChannels(info.availableChannels);
-
-        if (
-          info.availableChannels.length > 0 &&
-          !info.availableChannels.includes(activePlayer.channel)
-        ) {
-          switchPlayerChannel(info.availableChannels[0]);
-        }
       })
       .catch(() => {
         if (!cancelled) setActiveAvailableChannels([1, 2, 3]);
@@ -220,9 +299,7 @@ export const StreamingPlayerModal: React.FC = () => {
     activePlayer?.imdbId,
     activePlayer?.season,
     activePlayer?.episode,
-    activePlayer?.channel,
     resolvingActiveImdb,
-    switchPlayerChannel,
   ]);
 
   // 5. Stage 3 + External Room Sync: Listen for iframe events (fallback + play/pause/seek)
@@ -506,6 +583,15 @@ export const StreamingPlayerModal: React.FC = () => {
   };
 
   const handleClosePlayer = () => {
+    if (introVideoRef.current) {
+      try {
+        introVideoRef.current.pause();
+      } catch {
+        // ignore
+      }
+    }
+    setIsPlayingIntro(false);
+    lastIntroContentKeyRef.current = null;
     exitNativeFullscreenIfActive();
     closePlayerSession();
   };
@@ -545,13 +631,8 @@ export const StreamingPlayerModal: React.FC = () => {
           }`
         : null;
 
-    const headerChannels =
-      activeAvailableChannels && activeAvailableChannels.length > 0
-        ? CHANNELS.filter((ch) => activeAvailableChannels.includes(ch.id))
-        : CHANNELS;
-
-    const noPlayerChannelsAvailable =
-      activeAvailableChannels !== null && activeAvailableChannels.length === 0;
+    const headerChannels = CHANNELS;
+    const noPlayerChannelsAvailable = false;
 
     return (
       <div
@@ -627,7 +708,74 @@ export const StreamingPlayerModal: React.FC = () => {
           id="SuperCDNContainerVideo"
           className="relative flex-1 w-full h-full min-h-0 bg-black overflow-hidden"
         >
-          {(resolvingActiveImdb || iframeLoading) && !noPlayerChannelsAvailable ? (
+          {/* Official Love Flix Opening Video with Sound */}
+          {isPlayingIntro && (
+            <div className="absolute inset-0 z-40 bg-black flex flex-col items-center justify-center select-none overflow-hidden">
+              <video
+                ref={introVideoRef}
+                src={OFFICIAL_LOVEFLIX_INTRO_VIDEO}
+                playsInline
+                autoPlay
+                preload="auto"
+                onTimeUpdate={() => {
+                  if (introVideoRef.current) {
+                    const d = introVideoRef.current.duration || 8.05;
+                    const ct = introVideoRef.current.currentTime || 0;
+                    setIntroTimeRemaining(Math.max(0, d - ct));
+                  }
+                }}
+                onEnded={handleEndIntro}
+                className="w-full h-full object-contain pointer-events-none"
+              />
+
+              {/* Top watermark / branding badge */}
+              <div className="absolute top-4 left-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/60 border border-white/10 backdrop-blur-md pointer-events-none">
+                <span className="w-2 h-2 rounded-full bg-[#E50914] animate-ping" />
+                <span className="text-[11px] font-extrabold tracking-wider text-white uppercase">
+                  Abertura Oficial Love Flix
+                </span>
+              </div>
+
+              {/* Bottom controls: Sound toggle + Skip button */}
+              <div className="absolute bottom-6 right-6 z-50 flex items-center gap-2.5">
+                {isIntroMuted ? (
+                  <button
+                    type="button"
+                    onClick={toggleIntroSound}
+                    className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-white text-xs font-bold border border-white/20 shadow-2xl transition-all cursor-pointer animate-pulse active:scale-95"
+                    title="Ativar som da abertura"
+                  >
+                    <VolumeX className="w-4 h-4" />
+                    <span>Ativar Som</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={toggleIntroSound}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-black/75 hover:bg-[#1f1f1f] text-white/90 text-xs font-bold border border-white/15 backdrop-blur-md transition-all cursor-pointer"
+                    title="Silenciar áudio da abertura"
+                  >
+                    <Volume2 className="w-4 h-4 text-[#FF253A]" />
+                    <span className="hidden sm:inline">Som Ativo</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleEndIntro}
+                  className="group inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-black/75 hover:bg-[#E50914] text-white text-xs font-bold border border-white/20 hover:border-transparent transition-all backdrop-blur-md shadow-2xl active:scale-95 cursor-pointer"
+                  title="Pular abertura oficial"
+                >
+                  <SkipForward className="w-4 h-4 fill-current transition-transform group-hover:translate-x-0.5" />
+                  <span>Pular Abertura</span>
+                  <span className="text-[#A1A1A1] group-hover:text-white tabular-nums">
+                    ({Math.ceil(introTimeRemaining)}s)
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {(resolvingActiveImdb || iframeLoading) && !noPlayerChannelsAvailable && !isPlayingIntro ? (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[#080808] pointer-events-none">
               <Loader2 className="w-9 h-9 animate-spin text-[#E50914]" />
               <p className="text-xs sm:text-sm font-semibold text-[#A1A1A1]">
@@ -660,7 +808,7 @@ export const StreamingPlayerModal: React.FC = () => {
                 </button>
               </div>
             </div>
-          ) : streamSrc ? (
+          ) : !isPlayingIntro && streamSrc ? (
             <iframe
               ref={iframeRef}
               key={`${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`}
@@ -693,20 +841,9 @@ export const StreamingPlayerModal: React.FC = () => {
       : null;
 
   const isChecking = resolvingImdb || checkingModalChannels;
-  const noChannelsAvailable =
-    modalAvailableChannels !== null && modalAvailableChannels.length === 0;
-  const visibleModalChannels =
-    modalAvailableChannels && modalAvailableChannels.length > 0
-      ? CHANNELS.filter((ch) => modalAvailableChannels.includes(ch.id))
-      : CHANNELS;
-
-  const availabilitySubtitle = isChecking
-    ? 'Verificando disponibilidade nos canais...'
-    : modalAvailableChannels && modalAvailableChannels.length > 0 && modalAvailableChannels.length < 3
-    ? modalAvailableChannels.length === 1
-      ? '1 canal disponível para este título'
-      : `${modalAvailableChannels.length} canais disponíveis para este título`
-    : null;
+  const noChannelsAvailable = false;
+  const visibleModalChannels = CHANNELS;
+  const availabilitySubtitle = null;
 
   return (
     <div

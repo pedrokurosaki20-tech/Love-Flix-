@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Layers, Loader2 } from 'lucide-react';
 import { HeroBanner } from '../components/HeroBanner';
-import { FilterBar } from '../components/FilterBar';
 import { AsyncCarouselRow } from '../components/AsyncCarouselRow';
 import { MediaCard } from '../components/MediaCard';
 import { ResilientImage } from '../components/ResilientImage';
@@ -10,7 +9,6 @@ import {
   DECADES_LIST,
   MOVIE_GENRES,
   POPULAR_COLLECTION_IDS,
-  type DiscoverFilterParams,
   type TMDBCollectionDetail,
   type TMDBMediaItem,
 } from '../types/tmdb';
@@ -18,20 +16,16 @@ import { getBackdropUrl, getPosterUrl, tmdbService } from '../services/tmdb';
 import { useNavigation } from '../context/NavigationContext';
 
 export const MoviesPage: React.FC = () => {
-  const { route, openCollectionDetail } = useNavigation();
+  const { route, navigate, openCollectionDetail } = useNavigation();
 
   const [heroMovies, setHeroMovies] = useState<TMDBMediaItem[]>([]);
   const [heroLoading, setHeroLoading] = useState(true);
 
-  // Advanced Filter State
-  const [filters, setFilters] = useState<DiscoverFilterParams>(() => ({
-    genre: route.genreId || undefined,
-    sortBy: 'popularity.desc',
-    page: 1,
-  }));
-  const [filteredResults, setFilteredResults] = useState<TMDBMediaItem[]>([]);
-  const [filteredTotalPages, setFilteredTotalPages] = useState(1);
-  const [filteredLoading, setFilteredLoading] = useState(false);
+  // Genre filtered view if navigated via genre tag
+  const [genreResults, setGenreResults] = useState<TMDBMediaItem[]>([]);
+  const [genrePage, setGenrePage] = useState(1);
+  const [genreTotalPages, setGenreTotalPages] = useState(1);
+  const [genreLoading, setGenreLoading] = useState(false);
 
   // Interactive Tabs for Genre, Decade, and Country Spotlights
   const [selectedGenreTab, setSelectedGenreTab] = useState<string>('28');
@@ -41,21 +35,9 @@ export const MoviesPage: React.FC = () => {
   // Popular Franchises / Collections
   const [collections, setCollections] = useState<TMDBCollectionDetail[]>([]);
 
-  useEffect(() => {
-    if (route.genreId) {
-      setFilters((prev) => ({ ...prev, genre: route.genreId, page: 1 }));
-    }
-  }, [route.genreId]);
-
-  const hasActiveFilters = Boolean(
-    filters.genre ||
-      filters.year ||
-      filters.decade ||
-      filters.minRating ||
-      filters.language ||
-      filters.country ||
-      (filters.sortBy && filters.sortBy !== 'popularity.desc')
-  );
+  const activeGenre = route.genreId
+    ? MOVIE_GENRES.find((g) => String(g.id) === String(route.genreId))
+    : null;
 
   // Load Hero Movies + Collections
   useEffect(() => {
@@ -86,32 +68,36 @@ export const MoviesPage: React.FC = () => {
     };
   }, []);
 
-  // Load Filtered Movies whenever any filter is active
+  // Load Movies when a genre is selected from route
   useEffect(() => {
-    if (!hasActiveFilters) return;
+    if (!route.genreId) {
+      setGenreResults([]);
+      setGenrePage(1);
+      return;
+    }
     let cancelled = false;
-    setFilteredLoading(true);
+    setGenreLoading(true);
 
     tmdbService
-      .discoverMovies(filters)
+      .discoverMovies({ genre: route.genreId, sortBy: 'popularity.desc', page: genrePage })
       .then((res) => {
         if (cancelled) return;
-        setFilteredTotalPages(Math.min(res.total_pages || 1, 500));
-        setFilteredResults((prev) =>
-          (filters.page || 1) === 1 ? res.results : [...prev, ...res.results]
+        setGenreTotalPages(Math.min(res.total_pages || 1, 500));
+        setGenreResults((prev) =>
+          genrePage === 1 ? res.results : [...prev, ...res.results]
         );
       })
       .catch(() => {
-        if (!cancelled && (filters.page || 1) === 1) setFilteredResults([]);
+        if (!cancelled && genrePage === 1) setGenreResults([]);
       })
       .finally(() => {
-        if (!cancelled) setFilteredLoading(false);
+        if (!cancelled) setGenreLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [filters, hasActiveFilters]);
+  }, [route.genreId, genrePage]);
 
   const fetchPopular = useCallback(() => tmdbService.getMoviesList('popular', 1), []);
   const fetchNowPlaying = useCallback(() => tmdbService.getMoviesList('now_playing', 1), []);
@@ -159,36 +145,35 @@ export const MoviesPage: React.FC = () => {
         sectionKicker="Cinema & Longas-Metragens"
       />
 
-      {/* Advanced Filters Area */}
-      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-6">
-        <div className="mb-4">
-          <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-            Filmes
-          </h2>
-        </div>
-
-        <FilterBar
-          filters={filters}
-          onChange={setFilters}
-          onReset={() => setFilters({ sortBy: 'popularity.desc', page: 1 })}
-          genres={MOVIE_GENRES}
-          mediaMode="movie"
-        />
+      {/* Page Title Header */}
+      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-4">
+        <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+          Filmes
+        </h2>
       </div>
 
-      {/* Filtered Results Grid OR Curated Movie Hubs */}
-      {hasActiveFilters ? (
-        <section className="px-4 sm:px-6 lg:px-10 mt-6">
+      {/* Genre Filtered Results OR Curated Movie Hubs */}
+      {activeGenre ? (
+        <section className="px-4 sm:px-6 lg:px-10 mt-2">
           <div className="flex items-center justify-between mb-5">
-            <h3 className="font-display text-lg sm:text-xl font-bold text-white">
-              Resultados Filtrados
-            </h3>
+            <div className="flex items-center gap-3">
+              <h3 className="font-display text-lg sm:text-xl font-bold text-white">
+                Gênero: {activeGenre.name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => navigate({ page: 'movies' })}
+                className="text-xs text-[#FF253A] hover:underline cursor-pointer font-semibold"
+              >
+                ✕ Ver todos os filmes
+              </button>
+            </div>
             <span className="text-xs font-mono tabular-nums text-[#A1A1A1]">
-              {filteredResults.length} filmes exibidos
+              {genreResults.length} filmes
             </span>
           </div>
 
-          {filteredLoading && (filters.page || 1) === 1 ? (
+          {genreLoading && genrePage === 1 ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
               {Array.from({ length: 12 }).map((_, idx) => (
                 <div
@@ -197,41 +182,36 @@ export const MoviesPage: React.FC = () => {
                 />
               ))}
             </div>
-          ) : filteredResults.length === 0 ? (
+          ) : genreResults.length === 0 && !genreLoading ? (
             <div className="p-10 rounded-2xl bg-[#121212] border border-white/[0.08] text-center">
               <p className="text-base font-bold text-white mb-1">
-                Nenhum filme encontrado com esses filtros
-              </p>
-              <p className="text-xs sm:text-sm text-[#A1A1A1] mb-4">
-                Experimente relaxar a nota mínima ou selecionar outra combinação de ano e país.
+                Nenhum filme encontrado para este gênero
               </p>
               <button
                 type="button"
-                onClick={() => setFilters({ sortBy: 'popularity.desc', page: 1 })}
-                className="px-5 py-2.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white cursor-pointer"
+                onClick={() => navigate({ page: 'movies' })}
+                className="mt-3 px-5 py-2.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white cursor-pointer"
               >
-                Redefinir filtros
+                Voltar aos destaques
               </button>
             </div>
           ) : (
             <>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-5">
-                {filteredResults.map((movie, idx) => (
+                {genreResults.map((movie, idx) => (
                   <MediaCard key={`${movie.id}-${idx}`} item={movie} />
                 ))}
               </div>
 
-              {(filters.page || 1) < filteredTotalPages && (
+              {genrePage < genreTotalPages && (
                 <div className="mt-8 flex justify-center">
                   <button
                     type="button"
-                    disabled={filteredLoading}
-                    onClick={() =>
-                      setFilters((prev) => ({ ...prev, page: (prev.page || 1) + 1 }))
-                    }
+                    disabled={genreLoading}
+                    onClick={() => setGenrePage((prev) => prev + 1)}
                     className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#181818] hover:bg-[#222222] text-sm font-bold text-white border border-white/12 transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    {filteredLoading && <Loader2 className="w-4 h-4 animate-spin text-[#E50914]" />}
+                    {genreLoading && <Loader2 className="w-4 h-4 animate-spin text-[#E50914]" />}
                     <span>Carregar mais filmes</span>
                   </button>
                 </div>
