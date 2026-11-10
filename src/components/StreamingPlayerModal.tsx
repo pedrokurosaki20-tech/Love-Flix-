@@ -325,6 +325,11 @@ export const StreamingPlayerModal: React.FC = () => {
         return;
       }
 
+      if (d.type === 'LOVEFLIX_CLOSE_PLAYER') {
+        handleClosePlayer();
+        return;
+      }
+
       if (d.type === 'LOVEFLIX_PLAYER_READY' && isRoomConnected && iframeRef.current?.contentWindow) {
         if (
           syncedPlayback &&
@@ -632,7 +637,8 @@ export const StreamingPlayerModal: React.FC = () => {
         : null;
 
     const headerChannels = CHANNELS;
-    const noPlayerChannelsAvailable = false;
+    const noPlayerChannelsAvailable =
+      activeAvailableChannels !== null && activeAvailableChannels.length === 0;
 
     return (
       <div
@@ -669,14 +675,20 @@ export const StreamingPlayerModal: React.FC = () => {
               <div className="flex items-center gap-1 p-1 rounded-xl bg-[#121212] border border-white/[0.08]">
                 {headerChannels.map((ch) => {
                   const isSelected = activePlayer.channel === ch.id;
+                  const isUnavailable =
+                    activeAvailableChannels !== null &&
+                    !activeAvailableChannels.includes(ch.id);
                   return (
                     <button
                       key={ch.id}
                       type="button"
                       onClick={() => switchPlayerChannel(ch.id)}
+                      title={isUnavailable ? `${ch.label} (indisponível)` : ch.label}
                       className={`px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                         isSelected
-                          ? 'bg-[#E50914] text-white'
+                          ? 'bg-[#E50914] text-white shadow'
+                          : isUnavailable
+                          ? 'text-[#666666] hover:text-[#999999]'
                           : 'text-[#A1A1A1] hover:text-white hover:bg-white/[0.06]'
                       }`}
                     >
@@ -808,7 +820,7 @@ export const StreamingPlayerModal: React.FC = () => {
                 </button>
               </div>
             </div>
-          ) : !isPlayingIntro && streamSrc ? (
+          ) : !isPlayingIntro && streamSrc && streamSrc.trim() ? (
             <iframe
               ref={iframeRef}
               key={`${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`}
@@ -841,9 +853,16 @@ export const StreamingPlayerModal: React.FC = () => {
       : null;
 
   const isChecking = resolvingImdb || checkingModalChannels;
-  const noChannelsAvailable = false;
-  const visibleModalChannels = CHANNELS;
-  const availabilitySubtitle = null;
+  const noChannelsAvailable =
+    !isChecking && modalAvailableChannels !== null && modalAvailableChannels.length === 0;
+  const visibleModalChannels =
+    modalAvailableChannels && modalAvailableChannels.length > 0
+      ? CHANNELS.filter((ch) => modalAvailableChannels.includes(ch.id))
+      : CHANNELS;
+  const availabilitySubtitle =
+    modalAvailableChannels && modalAvailableChannels.length > 0
+      ? `${modalAvailableChannels.length} canal${modalAvailableChannels.length > 1 ? 'is' : ''} disponível${modalAvailableChannels.length > 1 ? 'is' : ''}`
+      : null;
 
   return (
     <div

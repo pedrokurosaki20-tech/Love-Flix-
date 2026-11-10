@@ -48,9 +48,11 @@ async function fetchSuperFlixList(
         method: 'GET',
         headers: {
           'User-Agent': BROWSER_USER_AGENT,
-          Accept: 'application/json',
+          Referer: 'https://superflixapi.fun/',
+          Accept: 'application/json, text/plain, */*',
         },
-        signal: AbortSignal.timeout(4500),
+        redirect: 'follow',
+        signal: AbortSignal.timeout(7000),
       }
     );
     if (!res.ok) return null;

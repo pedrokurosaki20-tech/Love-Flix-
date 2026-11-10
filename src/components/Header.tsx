@@ -1,10 +1,13 @@
 import React, { useMemo } from 'react';
 import { motion } from 'motion/react';
+import { LogIn, User } from 'lucide-react';
 import { useNavigation } from '../context/NavigationContext';
+import { useUserData } from '../context/UserDataContext';
 import type { PageRouteId } from '../types/tmdb';
 
 export const Header: React.FC = () => {
   const { route, navigateToPage } = useNavigation();
+  const { isLoggedIn, profile, openAuthModal } = useUserData();
 
   const categories: Array<{
     id: PageRouteId;
@@ -23,7 +26,7 @@ export const Header: React.FC = () => {
   return (
     <header className="relative z-30 bg-[#080808]/95 backdrop-blur-md border-b border-white/[0.06]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-10 pt-3.5 pb-2.5">
-        {/* Brand Title / Logo */}
+        {/* Brand Title / Logo & Account Status */}
         <div className="flex items-center justify-between mb-2.5">
           <a
             href="/"
@@ -35,6 +38,36 @@ export const Header: React.FC = () => {
           >
             <span className="text-[#E50914]">LOVE</span> FLIX
           </a>
+
+          {isLoggedIn ? (
+            <button
+              type="button"
+              onClick={() => navigateToPage('my-flix')}
+              className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 transition-colors cursor-pointer group"
+            >
+              {profile.avatarSrc && profile.avatarSrc.trim() ? (
+                <img
+                  src={profile.avatarSrc}
+                  alt={profile.name}
+                  className="w-5 h-5 rounded-full object-cover border border-white/20"
+                />
+              ) : (
+                <User className="w-3.5 h-3.5 text-white/80" />
+              )}
+              <span className="text-xs font-semibold text-white/90 group-hover:text-white max-w-[90px] truncate">
+                {profile.name || 'Minha Flix'}
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => openAuthModal('login')}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#E50914] hover:bg-[#d00812] text-white text-xs font-bold transition-all shadow-sm active:scale-95 cursor-pointer"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Entrar</span>
+            </button>
+          )}
         </div>
 
         {/* Horizontal Scrollable Category Carousel — Balanced Spacing */}

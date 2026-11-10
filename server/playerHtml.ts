@@ -35,7 +35,39 @@ export function renderStatusHtml(title: string, message: string): string {
       margin: 0 auto 16px;
     }
     h1 { font-size: 18px; font-weight: 800; margin-bottom: 8px; }
-    p { font-size: 14px; line-height: 1.55; color: #A1A1A1; }
+    .actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    .btn {
+      width: 100%;
+      padding: 12px 18px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .btn-red {
+      background: #E50914;
+      color: #ffffff;
+    }
+    .btn-red:hover {
+      background: #FF253A;
+    }
+    .btn-dark {
+      background: #1b1b1b;
+      color: #A1A1A1;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .btn-dark:hover {
+      color: #ffffff;
+      background: #252525;
+    }
   </style>
 </head>
 <body>
@@ -43,7 +75,23 @@ export function renderStatusHtml(title: string, message: string): string {
     <div class="dot"></div>
     <h1>${title}</h1>
     <p>${message}</p>
+    <div class="actions">
+      <button type="button" class="btn btn-red" onclick="tryFallbackChannel()">Tentar outro canal</button>
+      <button type="button" class="btn btn-dark" onclick="closePlayer()">Voltar ao catálogo</button>
+    </div>
   </div>
+  <script>
+    function tryFallbackChannel() {
+      try {
+        window.parent.postMessage({ type: 'LOVEFLIX_CHANNEL_FALLBACK' }, '*');
+      } catch (e) {}
+    }
+    function closePlayer() {
+      try {
+        window.parent.postMessage({ type: 'LOVEFLIX_CLOSE_PLAYER' }, '*');
+      } catch (e) {}
+    }
+  </script>
 </body>
 </html>`;
 }

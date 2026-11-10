@@ -1,6 +1,12 @@
 import React from 'react';
-import { useUserData } from '../context/UserDataContext';
+import { AuthModal } from './AuthModal';
+import { DnsPromptModals } from './DnsPromptModals';
 
 export const OverlayWidgets: React.FC = () => {
-  return null;
+  return (
+    <>
+      <AuthModal />
+      <DnsPromptModals />
+    </>
+  );
 };

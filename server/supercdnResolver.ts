@@ -604,142 +604,194 @@ export async function resolveSuperCdnChannel(params: {
 
     if (parsedUrl && (parsedHost.includes('vaiquecol') || parsedHost.includes('plenoflu'))) {
       const embedOrigin = parsedUrl.origin;
-      const embedRes = await fetch(resolvedStreamUrl, {
-        method: 'GET',
-        headers: {
-          Referer: `${SUPERCDN_BASE_URL}/`,
-          'User-Agent': BROWSER_USER_AGENT,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-        signal: AbortSignal.timeout(8500),
-      });
+      let embedRes: Response | null = null;
+      try {
+        embedRes = await fetch(resolvedStreamUrl, {
+          method: 'GET',
+          headers: {
+            Referer: `${SUPERCDN_BASE_URL}/`,
+            'User-Agent': BROWSER_USER_AGENT,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(6500),
+        });
+      } catch {
+        embedRes = null;
+      }
 
-      if (embedRes.ok) {
+      if (embedRes && embedRes.ok && embedRes.status === 200) {
         const embedCookies = extractCookieHeader(embedRes.headers);
         const embedHtml = await embedRes.text();
 
-        const unpacked = unpackDeanEdwards(embedHtml);
-        const fpHashMatch =
-          unpacked.match(/FirePlayer\(\s*["']([a-f0-9]{32})["']/i) ||
-          embedHtml.match(/FirePlayer\(\s*["']([a-f0-9]{32})["']/i) ||
-          embedHtml.match(/\|([a-f0-9]{32})\|/i);
+        const isApache404 =
+          embedHtml.includes('404 Not Found') ||
+          embedHtml.includes('The requested URL was not found on this server') ||
+          embedHtml.includes('ErrorDocument to handle the request') ||
+          embedHtml.includes('Acesso proibido');
 
-        const fireHash = fpHashMatch?.[1] || '';
+        if (!isApache404) {
+          const unpacked = unpackDeanEdwards(embedHtml);
+          const fpHashMatch =
+            unpacked.match(/FirePlayer\(\s*["']([a-f0-9]{32})["']/i) ||
+            embedHtml.match(/FirePlayer\(\s*["']([a-f0-9]{32})["']/i) ||
+            embedHtml.match(/\|([a-f0-9]{32})\|/i);
 
-        const subtitleTracks: SubtitleTrackItem[] = [];
-        if (unpacked) {
-          const tracksSection = unpacked.match(/"tracks"\s*:\s*(\[[\s\S]*?\])/);
-          if (tracksSection?.[1]) {
-            try {
-              const parsedTracks = JSON.parse(tracksSection[1]) as Array<{
-                file?: string;
-                label?: string;
-                language?: string;
-              }>;
-              const prioritized = parsedTracks
-                .filter((tr) => Boolean(tr?.file))
-                .map((tr) => {
-                  const meta = `${tr.language || ''} ${tr.label || ''}`.toLowerCase();
-                  const isPt =
-                    meta.includes('por') ||
-                    meta.includes('pt') ||
-                    meta.includes('portug') ||
-                    meta.includes('brasil');
-                  const isEn = meta.includes('eng') || meta.includes('english');
-                  const isEs =
-                    meta.includes('spa') || meta.includes('spanish') || meta.includes('espan');
-                  return { tr, isPt, isEn, isEs };
-                })
-                .filter((item) => item.isPt || item.isEn || item.isEs)
-                .sort((a, b) => Number(b.isPt) - Number(a.isPt));
+          const fireHash = fpHashMatch?.[1] || '';
 
-              for (const { tr, isPt, isEn } of prioritized) {
-                if (!tr.file) continue;
-                const absSub = new URL(tr.file, resolvedStreamUrl).toString();
-                subtitleTracks.push({
-                  label: isPt ? 'Português' : isEn ? 'Inglês' : tr.label || 'Espanhol',
-                  lang: isPt ? 'pt' : isEn ? 'en' : 'es',
-                  src: buildHlsProxyPath(absSub, embedOrigin, 'subtitle'),
-                  isDefault: false,
-                });
+          const subtitleTracks: SubtitleTrackItem[] = [];
+          if (unpacked) {
+            const tracksSection = unpacked.match(/"tracks"\s*:\s*(\[[\s\S]*?\])/);
+            if (tracksSection?.[1]) {
+              try {
+                const parsedTracks = JSON.parse(tracksSection[1]) as Array<{
+                  file?: string;
+                  label?: string;
+                  language?: string;
+                }>;
+                const prioritized = parsedTracks
+                  .filter((tr) => Boolean(tr?.file))
+                  .map((tr) => {
+                    const meta = `${tr.language || ''} ${tr.label || ''}`.toLowerCase();
+                    const isPt =
+                      meta.includes('por') ||
+                      meta.includes('pt') ||
+                      meta.includes('portug') ||
+                      meta.includes('brasil');
+                    const isEn = meta.includes('eng') || meta.includes('english');
+                    const isEs =
+                      meta.includes('spa') || meta.includes('spanish') || meta.includes('espan');
+                    return { tr, isPt, isEn, isEs };
+                  })
+                  .filter((item) => item.isPt || item.isEn || item.isEs)
+                  .sort((a, b) => Number(b.isPt) - Number(a.isPt));
+
+                for (const { tr, isPt, isEn } of prioritized) {
+                  if (!tr.file) continue;
+                  const absSub = new URL(tr.file, resolvedStreamUrl).toString();
+                  subtitleTracks.push({
+                    label: isPt ? 'Português' : isEn ? 'Inglês' : tr.label || 'Espanhol',
+                    lang: isPt ? 'pt' : isEn ? 'en' : 'es',
+                    src: buildHlsProxyPath(absSub, embedOrigin, 'subtitle'),
+                    isDefault: false,
+                  });
+                }
+              } catch {
+                // ignore malformed tracks
               }
-            } catch {
-              // ignore malformed tracks
             }
           }
-        }
 
-        if (fireHash) {
-          const videoApiRes = await fetch(
-            `${embedOrigin}/player/index.php?data=${fireHash}&do=getVideo`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                Referer: resolvedStreamUrl,
-                Origin: embedOrigin,
-                'X-Requested-With': 'XMLHttpRequest',
-                'User-Agent': BROWSER_USER_AGENT,
-                ...(embedCookies ? { Cookie: embedCookies } : {}),
-              },
-              body: new URLSearchParams({
-                hash: fireHash,
-                r: `${SUPERCDN_BASE_URL}/`,
-              }).toString(),
-              signal: AbortSignal.timeout(8500),
-            }
-          );
-
-          if (videoApiRes.ok) {
-            const rawVideoBody = await videoApiRes.text();
-            let videoJson: {
-              videoSource?: string;
-              securedLink?: string;
-              videoImage?: string;
-            } | null = null;
+          if (fireHash) {
             try {
-              videoJson = JSON.parse(rawVideoBody);
-            } catch {
-              videoJson = null;
-            }
+              const videoApiRes = await fetch(
+                `${embedOrigin}/player/index.php?data=${fireHash}&do=getVideo`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    Referer: resolvedStreamUrl,
+                    Origin: embedOrigin,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'User-Agent': BROWSER_USER_AGENT,
+                    ...(embedCookies ? { Cookie: embedCookies } : {}),
+                  },
+                  body: new URLSearchParams({
+                    hash: fireHash,
+                    r: `${SUPERCDN_BASE_URL}/`,
+                  }).toString(),
+                  signal: AbortSignal.timeout(7500),
+                }
+              );
 
-            const masterHlsUrl = (videoJson?.videoSource || videoJson?.securedLink || '').trim();
-            if (masterHlsUrl && /^https?:\/\//i.test(masterHlsUrl)) {
-              const proxiedMasterPath = buildHlsProxyPath(masterHlsUrl, embedOrigin, 'manifest');
-              const playerHtml = renderDirectVideoHtml(proxiedMasterPath, subtitleTracks, null);
-              const entry: SuperCdnResolvedEntry = {
-                kind: 'html',
-                available: true,
-                resolvedChannel: 1,
-                html: playerHtml,
-                masterHlsUrl,
-                embedOrigin,
-                subtitleTracks,
-                expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
-              };
-              superCdnStreamCache.set(cacheKey, entry);
+              if (videoApiRes.ok) {
+                const rawVideoBody = await videoApiRes.text();
+                let videoJson: {
+                  videoSource?: string;
+                  securedLink?: string;
+                  videoImage?: string;
+                } | null = null;
+                try {
+                  videoJson = JSON.parse(rawVideoBody);
+                } catch {
+                  videoJson = null;
+                }
 
-              if (warmOnly) {
-                await warmInitialHlsStream(masterHlsUrl, embedOrigin, true);
-              } else {
-                void warmInitialHlsStream(masterHlsUrl, embedOrigin, false);
+                const masterHlsUrl = (videoJson?.videoSource || videoJson?.securedLink || '').trim();
+                if (masterHlsUrl && /^https?:\/\//i.test(masterHlsUrl)) {
+                  const proxiedMasterPath = buildHlsProxyPath(masterHlsUrl, embedOrigin, 'manifest');
+                  const playerHtml = renderDirectVideoHtml(proxiedMasterPath, subtitleTracks, null);
+                  const entry: SuperCdnResolvedEntry = {
+                    kind: 'html',
+                    available: true,
+                    resolvedChannel: 1,
+                    html: playerHtml,
+                    masterHlsUrl,
+                    embedOrigin,
+                    subtitleTracks,
+                    expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
+                  };
+                  superCdnStreamCache.set(cacheKey, entry);
+
+                  if (warmOnly) {
+                    await warmInitialHlsStream(masterHlsUrl, embedOrigin, true);
+                  } else {
+                    void warmInitialHlsStream(masterHlsUrl, embedOrigin, false);
+                  }
+
+                  return entry;
+                }
               }
-
-              return entry;
+            } catch {
+              // ignore getVideo error
             }
           }
         }
       }
 
-      const fallbackEntry: SuperCdnResolvedEntry = {
-        kind: 'redirect',
-        available: true,
+      const deadVaiquecolEntry: SuperCdnResolvedEntry = {
+        kind: 'html',
+        available: false,
         resolvedChannel: 1,
-        url: resolvedStreamUrl,
-        expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
+        html: renderStatusHtml(
+          'Canal 1 indisponível para este título',
+          'Selecione outro canal disponível no topo do reprodutor para iniciar a transmissão.'
+        ),
+        expiresAt: Date.now() + 60 * 1000,
       };
-      superCdnStreamCache.set(cacheKey, fallbackEntry);
-      return fallbackEntry;
+      superCdnStreamCache.set(cacheKey, deadVaiquecolEntry);
+      return deadVaiquecolEntry;
+    }
+
+    let isReachable = true;
+    try {
+      const probeRes = await fetch(resolvedStreamUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': BROWSER_USER_AGENT,
+          Accept: '*/*',
+        },
+        signal: AbortSignal.timeout(4500),
+      });
+      if (probeRes.status === 404 || probeRes.status === 410) {
+        isReachable = false;
+      }
+    } catch {
+      // optimistic on transient timeout
+    }
+
+    if (!isReachable) {
+      const deadEntry: SuperCdnResolvedEntry = {
+        kind: 'html',
+        available: false,
+        resolvedChannel: 1,
+        html: renderStatusHtml(
+          'Canal 1 indisponível para este título',
+          'Selecione outro canal disponível no topo do reprodutor para iniciar a transmissão.'
+        ),
+        expiresAt: Date.now() + 60 * 1000,
+      };
+      superCdnStreamCache.set(cacheKey, deadEntry);
+      return deadEntry;
     }
 
     const entry: SuperCdnResolvedEntry = {

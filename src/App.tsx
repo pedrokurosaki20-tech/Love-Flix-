@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { UserDataProvider } from './context/UserDataContext';
+import { UserDataProvider, useUserData } from './context/UserDataContext';
 import { NavigationProvider, useNavigation } from './context/NavigationContext';
 import { ExternalRoomProvider } from './context/ExternalRoomContext';
 import { Header } from './components/Header';
@@ -13,6 +13,8 @@ import { FloatingDock } from './components/FloatingDock';
 import { Footer } from './components/Footer';
 import { StreamingPlayerModal } from './components/StreamingPlayerModal';
 import { OverlayWidgets } from './components/OverlayWidgets';
+import { AuthCard } from './components/AuthCard';
+import { WhoIsWatchingScreen } from './components/WhoIsWatchingScreen';
 
 import { HomePage } from './pages/HomePage';
 import { MoviesPage } from './pages/MoviesPage';
@@ -22,7 +24,6 @@ import { DoramasPage } from './pages/DoramasPage';
 import { DocumentariesPage } from './pages/DocumentariesPage';
 import { SearchPage } from './pages/SearchPage';
 import { MyFlixPage } from './pages/MyFlixPage';
-import { MyAccountPage } from './pages/MyAccountPage';
 import {
   CollectionDetailPage,
   MediaDetailPage,
@@ -31,6 +32,41 @@ import {
 
 const AppWorkspace: React.FC = () => {
   const { route } = useNavigation();
+  const { isLoggedIn, isProfileSelected } = useUserData();
+
+  // 1. Caso o usuário não esteja logado, exige login ou cadastro para entrar
+  if (!isLoggedIn) {
+    return (
+      <div className="min-h-screen bg-[#080808] text-white flex flex-col justify-center items-center px-4 py-8 relative overflow-hidden">
+        {/* Glow de iluminação cinematográfica */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[520px] h-[340px] bg-[#E50914]/10 rounded-full blur-[140px] pointer-events-none" />
+
+        {/* Marca no topo */}
+        <div className="mb-6 text-center relative z-10">
+          <div className="font-display text-3xl sm:text-4xl font-extrabold tracking-tight text-white select-none">
+            <span className="text-[#E50914]">LOVE</span> FLIX
+          </div>
+        </div>
+
+        {/* Card de Autenticação */}
+        <div className="relative z-10 w-full max-w-md animate-fade-in">
+          <AuthCard />
+        </div>
+
+        {/* Rodapé discreto */}
+        <footer className="mt-8 text-center relative z-10">
+          <span className="font-display text-xs font-bold text-white/40 tracking-wider">
+            <span className="text-[#E50914]/60">LOVE</span> FLIX
+          </span>
+        </footer>
+      </div>
+    );
+  }
+
+  // 2. Logado, mas nenhum perfil selecionado: exibe a tela "Quem está assistindo?"
+  if (!isProfileSelected) {
+    return <WhoIsWatchingScreen />;
+  }
 
   const renderPage = () => {
     switch (route.page) {
@@ -49,9 +85,8 @@ const AppWorkspace: React.FC = () => {
       case 'search':
         return <SearchPage />;
       case 'my-flix':
-        return <MyFlixPage />;
       case 'my-account':
-        return <MyAccountPage />;
+        return <MyFlixPage />;
       case 'detail':
         return (
           <MediaDetailPage

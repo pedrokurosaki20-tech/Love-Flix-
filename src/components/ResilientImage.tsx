@@ -17,7 +17,9 @@ export const ResilientImage: React.FC<ResilientImageProps> = ({
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  if (!src || failed) {
+  const cleanSrc = typeof src === 'string' && src.trim().length > 0 ? src.trim() : null;
+
+  if (!cleanSrc || failed) {
     return (
       <div
         className={`flex flex-col items-center justify-center bg-gradient-to-br from-[#191919] via-[#121212] to-[#0a0a0a] text-[#A1A1A1] select-none p-4 text-center ${className}`}
@@ -42,7 +44,7 @@ export const ResilientImage: React.FC<ResilientImageProps> = ({
         <div className="absolute inset-0 bg-[#181818] animate-pulse" aria-hidden="true" />
       )}
       <img
-        src={src}
+        src={cleanSrc}
         alt={alt}
         referrerPolicy="no-referrer"
         loading="lazy"

@@ -157,7 +157,7 @@ export const SearchPage: React.FC = () => {
   };
 
   return (
-    <div className="py-6 sm:py-8 space-y-8 min-h-[80vh]">
+    <div className="py-6 sm:py-8 space-y-8">
       {/* Campo de Pesquisa */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-10">
         <form onSubmit={handleSearchSubmit} className="relative">

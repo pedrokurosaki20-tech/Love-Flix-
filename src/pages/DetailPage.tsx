@@ -661,16 +661,18 @@ export const MediaDetailPage: React.FC<{
               )}
             </div>
 
-            <div className="aspect-video w-full max-w-4xl rounded-2xl overflow-hidden bg-black border border-white/10 shadow-xl">
-              <iframe
-                key={selectedVideo.key}
-                src={`https://www.youtube-nocookie.com/embed/${selectedVideo.key}?rel=0`}
-                title={selectedVideo.name}
-                className="w-full h-full border-0"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
-            </div>
+            {selectedVideo?.key && (
+              <div className="aspect-video w-full max-w-4xl rounded-2xl overflow-hidden bg-black border border-white/10 shadow-xl">
+                <iframe
+                  key={selectedVideo.key}
+                  src={`https://www.youtube-nocookie.com/embed/${selectedVideo.key}?rel=0`}
+                  title={selectedVideo.name}
+                  className="w-full h-full border-0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            )}
           </section>
         )}
 
