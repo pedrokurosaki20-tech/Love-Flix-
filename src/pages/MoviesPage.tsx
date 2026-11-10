@@ -44,7 +44,7 @@ export const MoviesPage: React.FC = () => {
     let cancelled = false;
     setHeroLoading(true);
     tmdbService
-      .getMoviesList('now_playing', 1)
+      .getMoviesList('popular', 1)
       .then((res) => {
         if (!cancelled) setHeroMovies(res.results || []);
       })
@@ -100,8 +100,7 @@ export const MoviesPage: React.FC = () => {
   }, [route.genreId, genrePage]);
 
   const fetchPopular = useCallback(() => tmdbService.getMoviesList('popular', 1), []);
-  const fetchNowPlaying = useCallback(() => tmdbService.getMoviesList('now_playing', 1), []);
-  const fetchUpcoming = useCallback(() => tmdbService.getMoviesList('upcoming', 1), []);
+  const fetchRecentDigital = useCallback(() => tmdbService.getRecentDigitalReleases(1), []);
   const fetchTopRated = useCallback(() => tmdbService.getMoviesList('top_rated', 1), []);
   const fetchRecommended = useCallback(
     () =>
@@ -222,9 +221,9 @@ export const MoviesPage: React.FC = () => {
       ) : (
         <div className="space-y-1">
           <AsyncCarouselRow title="Filmes populares" fetcher={fetchPopular} eager />
-          <AsyncCarouselRow title="Filmes em cartaz" fetcher={fetchNowPlaying} eager />
-          <AsyncCarouselRow title="Próximos lançamentos" fetcher={fetchUpcoming} eager />
+          <AsyncCarouselRow title="Lançamentos digitais recentes" fetcher={fetchRecentDigital} eager />
           <AsyncCarouselRow title="Filmes mais bem avaliados" fetcher={fetchTopRated} />
+          <AsyncCarouselRow title="Recomendados para você" fetcher={fetchRecommended} />
 
           {/* Coleções e franquias populares */}
           {collections.length > 0 && (

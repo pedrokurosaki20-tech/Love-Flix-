@@ -18,6 +18,7 @@ import {
   resolveStreamWithFallback,
 } from './supercdnResolver.js';
 import { registerExternalBridgeRoutes } from './externalRoomBridge.js';
+import { getCinemaFilterState, isMovieCinemaOnly } from './cinemaFilter.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -155,6 +156,23 @@ export function registerApiRoutes(app: Express): void {
         : { error: await upstream.text() };
 
       if (upstream.ok) {
+        if (
+          cleanPath.startsWith('movie/now_playing') ||
+          cleanPath.startsWith('movie/upcoming')
+        ) {
+          try {
+            const cinemaState = await getCinemaFilterState();
+            if (payload && typeof payload === 'object' && Array.isArray((payload as Record<string, unknown>).results)) {
+              const resList = (payload as { results: Array<{ id: number }> }).results;
+              (payload as { results: Array<{ id: number }> }).results = resList.filter(
+                (item) => item && !cinemaState.cinemaOnlyIds.has(String(item.id))
+              );
+            }
+          } catch {
+            // ignore
+          }
+        }
+
         pruneCache();
         tmdbServerCache.set(cacheKey, {
           status: upstream.status,
@@ -171,6 +189,37 @@ export function registerApiRoutes(app: Express): void {
           ? 'Tempo limite excedido ao consultar a TMDB.'
           : 'Falha de comunicação com o serviço da TMDB.';
       res.status(502).json({ error: message });
+    }
+  });
+
+  // Stage 0: Intelligent Cinema-Only Verification & Auto-Exclusion Filter
+  app.get('/api/supercdn/cinema-filter', async (_req: Request, res: Response) => {
+    try {
+      const state = await getCinemaFilterState();
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
+      res.status(200).json({
+        ok: true,
+        cinemaOnlyIds: Array.from(state.cinemaOnlyIds),
+        totalExcluded: state.cinemaOnlyIds.size,
+        lastUpdated: state.lastUpdated,
+      });
+    } catch {
+      res.status(200).json({ ok: false, cinemaOnlyIds: [], totalExcluded: 0 });
+    }
+  });
+
+  app.get('/api/supercdn/cinema-status', async (req: Request, res: Response) => {
+    try {
+      const tmdbId = String(req.query.tmdbId || '').replace(/\D/g, '');
+      if (!tmdbId) {
+        res.status(200).json({ ok: true, isCinemaOnly: false });
+        return;
+      }
+      const isCinemaOnly = await isMovieCinemaOnly(tmdbId);
+      res.setHeader('Cache-Control', 'public, max-age=180, s-maxage=300');
+      res.status(200).json({ ok: true, tmdbId, isCinemaOnly });
+    } catch {
+      res.status(200).json({ ok: false, tmdbId: req.query.tmdbId, isCinemaOnly: false });
     }
   });
 

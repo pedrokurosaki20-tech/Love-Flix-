@@ -73,7 +73,7 @@ export const HomePage: React.FC = () => {
     () => tmdbService.discoverAnimes('tv', { sortBy: 'popularity.desc' }),
     []
   );
-  const fetchRecentReleases = useCallback(() => tmdbService.getMoviesList('now_playing', 1), []);
+  const fetchRecentReleases = useCallback(() => tmdbService.getRecentDigitalReleases(1), []);
   const fetchTopRated = useCallback(() => tmdbService.getMoviesList('top_rated', 1), []);
   const fetchMostPopularTMDB = useCallback(() => tmdbService.getMoviesList('popular', 1), []);
   const fetchActionMovies = useCallback(

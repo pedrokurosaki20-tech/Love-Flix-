@@ -10,6 +10,7 @@ import {
   checkSuperFlixCatalogAvailable,
   probeStreamBetterAvailable,
 } from './catalogAvailability.js';
+import { isMovieCinemaOnly } from './cinemaFilter.js';
 import { renderStatusHtml, renderDirectVideoHtml } from './playerHtml.js';
 
 export interface SuperCdnResolvedEntry {
@@ -494,6 +495,22 @@ export async function resolveSuperCdnChannel(params: {
   }
 
   const task = (async (): Promise<SuperCdnResolvedEntry> => {
+    if (type === 'movie' && tmdbId) {
+      const isCinemaExclusive = await isMovieCinemaOnly(tmdbId);
+      if (isCinemaExclusive) {
+        return {
+          kind: 'html',
+          available: false,
+          resolvedChannel: channel,
+          html: renderStatusHtml(
+            'Exclusivo nos Cinemas 🎬',
+            'Este filme ainda está em exibição exclusiva nos cinemas e não foi lançado em plataformas digitais. A Love Flix disponibilizará o filme automaticamente em alta definição assim que o lançamento oficial for liberado.'
+          ),
+          expiresAt: Date.now() + 60 * 1000,
+        };
+      }
+    }
+
     const providers = await resolveAllTitleProviders({
       type,
       imdb,
@@ -836,6 +853,21 @@ export async function checkTitleChannelAvailability(params: {
   if (inflight) return inflight;
 
   const work = (async (): Promise<ChannelAvailabilityReport> => {
+    if (type === 'movie' && tmdbId) {
+      const isCinemaExclusive = await isMovieCinemaOnly(tmdbId);
+      if (isCinemaExclusive) {
+        return {
+          availableChannels: [],
+          recommendedChannel: null,
+          channels: {
+            1: false,
+            2: false,
+            3: false,
+          },
+        };
+      }
+    }
+
     const providers = await resolveAllTitleProviders({
       type,
       imdb,

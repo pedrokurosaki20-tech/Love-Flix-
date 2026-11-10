@@ -4,6 +4,7 @@ import {
   Bookmark,
   Check,
   CheckCircle2,
+  Clapperboard,
   Film,
   Heart,
   Layers,
@@ -29,6 +30,7 @@ import {
   getPosterUrl,
   getProfileUrl,
   getStillUrl,
+  isCinemaOnlyMovie,
   pickBestTrailer,
   tmdbService,
 } from '../services/tmdb';
@@ -78,6 +80,7 @@ export const MediaDetailPage: React.FC<{
   const [selectedSeasonNumber, setSelectedSeasonNumber] = useState<number>(1);
   const [seasonDetail, setSeasonDetail] = useState<TMDBSeasonDetail | null>(null);
   const [seasonLoading, setSeasonLoading] = useState<boolean>(false);
+  const [isCinemaExclusive, setIsCinemaExclusive] = useState<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -85,16 +88,20 @@ export const MediaDetailPage: React.FC<{
     setError(null);
     setDetail(null);
     setSeasonDetail(null);
+    setIsCinemaExclusive(false);
 
     (async () => {
       try {
-        const data =
+        const [data, cinemaOnly] = await Promise.all([
           mediaType === 'tv'
-            ? await tmdbService.getTVDetails(id)
-            : await tmdbService.getMovieDetails(id);
+            ? tmdbService.getTVDetails(id)
+            : tmdbService.getMovieDetails(id),
+          mediaType === 'movie' ? isCinemaOnlyMovie(id) : Promise.resolve(false),
+        ]);
 
         if (cancelled) return;
         setDetail(data);
+        setIsCinemaExclusive(cinemaOnly);
         recordHistoryVisit(data, 'viewed');
 
         const ytVideos = (data.videos?.results || []).filter(
@@ -356,56 +363,105 @@ export const MediaDetailPage: React.FC<{
                 ) : null}
               </div>
 
+              {/* Cinema Exclusivity Notice for Theatrical Titles */}
+              {isCinemaExclusive && (
+                <div className="rounded-2xl bg-gradient-to-r from-amber-500/15 via-[#1a150c] to-transparent border border-amber-500/30 p-4 sm:p-5 flex items-start gap-3.5 shadow-2xl">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center shrink-0 text-amber-400">
+                    <Clapperboard className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1.5 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Exclusivo nos Cinemas
+                      </span>
+                    </div>
+                    <p className="text-xs sm:text-sm font-medium text-white/95 leading-relaxed">
+                      Este filme está atualmente em exibição exclusiva nos cinemas e ainda não foi liberado para plataformas digitais de streaming.
+                    </p>
+                    <p className="text-[11px] sm:text-xs text-[#A1A1A1] leading-relaxed">
+                      Para assegurar a máxima qualidade de áudio e imagem (Full HD / 4K) sem gravações de cinema ou selos na tela, a Love Flix adicionará este título automaticamente assim que o lançamento oficial em plataformas digitais for disponibilizado.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Primary Hero Actions (Big Play Button & Trailer) */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const resolvedImdb =
-                      detail.imdb_id || detail.external_ids?.imdb_id || null;
-                    const activeSeason =
-                      mediaType === 'tv'
-                        ? trackedHistoryEntry?.trackedSeason || selectedSeasonNumber || 1
-                        : undefined;
-                    const activeEpisode =
-                      mediaType === 'tv'
-                        ? trackedHistoryEntry?.trackedEpisode || 1
-                        : undefined;
+                {isCinemaExclusive ? (
+                  <>
+                    {selectedVideo ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const el = document.getElementById('trailer-section');
+                          if (el) {
+                            el.scrollIntoView({ behavior: 'smooth' });
+                          }
+                        }}
+                        className="inline-flex items-center justify-center gap-3 w-full sm:w-auto sm:min-w-[210px] px-8 py-3.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-white text-sm sm:text-base font-extrabold shadow-xl shadow-[#E50914]/25 active:scale-[0.99] transition-all cursor-pointer min-h-[48px]"
+                      >
+                        <Film className="w-5 h-5 text-white shrink-0" />
+                        <span>Assistir Trailer Oficial</span>
+                      </button>
+                    ) : null}
 
-                    openWatchModal({
-                      mediaType,
-                      id: detail.id,
-                      title,
-                      imdbId: resolvedImdb,
-                      season: activeSeason,
-                      episode: activeEpisode,
-                      episodeTitle:
-                        mediaType === 'tv'
-                          ? trackedHistoryEntry?.trackedEpisodeTitle
-                          : undefined,
-                      item: detail,
-                    });
-                  }}
-                  className="inline-flex items-center justify-center gap-3 w-full sm:w-auto sm:min-w-[210px] px-8 py-3.5 rounded-xl bg-white hover:bg-white/90 text-black text-sm sm:text-base font-extrabold shadow-xl shadow-white/5 active:scale-[0.99] transition-all cursor-pointer min-h-[48px]"
-                >
-                  <Play className="w-5 h-5 fill-black text-black shrink-0" />
-                  <span className="truncate">{playLabel}</span>
-                </button>
+                    <div className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white/[0.05] border border-white/10 text-xs sm:text-sm font-semibold text-[#A1A1A1] min-h-[48px]">
+                      <Clapperboard className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>Aguardando lançamento digital em alta definição</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const resolvedImdb =
+                          detail.imdb_id || detail.external_ids?.imdb_id || null;
+                        const activeSeason =
+                          mediaType === 'tv'
+                            ? trackedHistoryEntry?.trackedSeason || selectedSeasonNumber || 1
+                            : undefined;
+                        const activeEpisode =
+                          mediaType === 'tv'
+                            ? trackedHistoryEntry?.trackedEpisode || 1
+                            : undefined;
 
-                {selectedVideo && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const el = document.getElementById('trailer-section');
-                      if (el) {
-                        el.scrollIntoView({ behavior: 'smooth' });
-                      }
-                    }}
-                    className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-3.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-white text-sm font-bold border border-white/12 transition-all cursor-pointer min-h-[48px] active:scale-[0.99]"
-                  >
-                    <Film className="w-4 h-4 text-[#FF253A] shrink-0" />
-                    <span>Assistir Trailer</span>
-                  </button>
+                        openWatchModal({
+                          mediaType,
+                          id: detail.id,
+                          title,
+                          imdbId: resolvedImdb,
+                          season: activeSeason,
+                          episode: activeEpisode,
+                          episodeTitle:
+                            mediaType === 'tv'
+                              ? trackedHistoryEntry?.trackedEpisodeTitle
+                              : undefined,
+                          item: detail,
+                        });
+                      }}
+                      className="inline-flex items-center justify-center gap-3 w-full sm:w-auto sm:min-w-[210px] px-8 py-3.5 rounded-xl bg-white hover:bg-white/90 text-black text-sm sm:text-base font-extrabold shadow-xl shadow-white/5 active:scale-[0.99] transition-all cursor-pointer min-h-[48px]"
+                    >
+                      <Play className="w-5 h-5 fill-black text-black shrink-0" />
+                      <span className="truncate">{playLabel}</span>
+                    </button>
+
+                    {selectedVideo && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const el = document.getElementById('trailer-section');
+                          if (el) {
+                            el.scrollIntoView({ behavior: 'smooth' });
+                          }
+                        }}
+                        className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-3.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-white text-sm font-bold border border-white/12 transition-all cursor-pointer min-h-[48px] active:scale-[0.99]"
+                      >
+                        <Film className="w-4 h-4 text-[#FF253A] shrink-0" />
+                        <span>Assistir Trailer</span>
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
 

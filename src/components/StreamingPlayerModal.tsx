@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom';
 import {
   ArrowLeft,
   ChevronRight,
+  Clapperboard,
   Loader2,
   Maximize2,
   Minimize2,
@@ -16,7 +17,7 @@ import {
 import { useNavigation } from '../context/NavigationContext';
 import { useExternalRoom } from '../context/ExternalRoomContext';
 import { useUserData } from '../context/UserDataContext';
-import { tmdbService } from '../services/tmdb';
+import { isCinemaOnlyMovie, tmdbService } from '../services/tmdb';
 import type { ExternalPlaybackAction } from '../types/externalRoom';
 
 const OFFICIAL_LOVEFLIX_INTRO_VIDEO = '/assets/aistudio/lv_0_20261031073011_3b9bb1a5.mp4';
@@ -62,12 +63,14 @@ export const StreamingPlayerModal: React.FC = () => {
     null
   );
   const [checkingModalChannels, setCheckingModalChannels] = useState(false);
+  const [isModalCinemaExclusive, setIsModalCinemaExclusive] = useState(false);
 
   // Stage 2 & 3: Verified channels & auto-fallback inside active fullscreen player
   const [resolvingActiveImdb, setResolvingActiveImdb] = useState(false);
   const [activeAvailableChannels, setActiveAvailableChannels] = useState<Array<1 | 2 | 3> | null>(
     null
   );
+  const [activeIsCinemaExclusive, setActiveIsCinemaExclusive] = useState(false);
 
   const [iframeLoading, setIframeLoading] = useState(false);
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
@@ -167,7 +170,20 @@ export const StreamingPlayerModal: React.FC = () => {
       setImdbChecked(false);
       setModalAvailableChannels(null);
       setCheckingModalChannels(false);
+      setIsModalCinemaExclusive(false);
       return;
+    }
+
+    if (watchRequest.mediaType === 'movie') {
+      isCinemaOnlyMovie(watchRequest.id)
+        .then((isOnly) => {
+          setIsModalCinemaExclusive(isOnly);
+        })
+        .catch(() => {
+          setIsModalCinemaExclusive(false);
+        });
+    } else {
+      setIsModalCinemaExclusive(false);
     }
 
     if (watchRequest.imdbId && /^tt\d+/i.test(watchRequest.imdbId)) {
@@ -267,6 +283,27 @@ export const StreamingPlayerModal: React.FC = () => {
       cancelled = true;
     };
   }, [activePlayer?.id, activePlayer?.mediaType, activePlayer?.imdbId, updateActivePlayerImdb]);
+
+  // Check if active media is exclusive to movie theaters
+  useEffect(() => {
+    if (!activePlayer || activePlayer.mediaType !== 'movie') {
+      setActiveIsCinemaExclusive(false);
+      return;
+    }
+
+    let cancelled = false;
+    isCinemaOnlyMovie(activePlayer.id)
+      .then((isOnly) => {
+        if (!cancelled) setActiveIsCinemaExclusive(isOnly);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveIsCinemaExclusive(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activePlayer?.id, activePlayer?.mediaType]);
 
   // 4. Stage 2: Verify channels in background for fallback intelligence
   useEffect(() => {
@@ -802,7 +839,28 @@ export const StreamingPlayerModal: React.FC = () => {
             </div>
           )}
 
-          {noPlayerChannelsAvailable ? (
+          {activeIsCinemaExclusive ? (
+            <div className="w-full h-full flex items-center justify-center p-6 text-center bg-[#080808]">
+              <div className="max-w-md rounded-2xl bg-[#121212] border border-amber-500/30 p-7 shadow-2xl">
+                <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-4">
+                  <Clapperboard className="w-6 h-6" />
+                </div>
+                <p className="text-base font-bold text-white mb-2">
+                  Exclusivo nos Cinemas 🎬
+                </p>
+                <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed mb-5">
+                  Este filme ainda está em exibição exclusiva nos cinemas e não foi liberado em plataformas digitais. A Love Flix disponibilizará a transmissão automaticamente em alta definição (Full HD / 4K) assim que o lançamento oficial for lançado.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleClosePlayer}
+                  className="px-6 py-2.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white transition-colors cursor-pointer shadow-lg"
+                >
+                  Voltar ao catálogo
+                </button>
+              </div>
+            </div>
+          ) : noPlayerChannelsAvailable ? (
             <div className="w-full h-full flex items-center justify-center p-6 text-center bg-[#080808]">
               <div className="max-w-md rounded-2xl bg-[#121212] border border-white/10 p-7">
                 <p className="text-base font-bold text-white mb-2">
@@ -906,7 +964,29 @@ export const StreamingPlayerModal: React.FC = () => {
         </div>
 
         {/* Verified Channel Options or Clean Unavailable Notice */}
-        {noChannelsAvailable ? (
+        {isModalCinemaExclusive ? (
+          <div className="py-2 text-center space-y-4">
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <Clapperboard className="w-6 h-6" />
+            </div>
+            <div className="space-y-1.5 px-1">
+              <h4 className="text-base font-bold text-white">Disponível apenas nos cinemas</h4>
+              <p className="text-xs text-[#A1A1A1] leading-relaxed">
+                Este filme ainda está em exibição exclusiva nos cinemas e não foi lançado em plataformas digitais.
+              </p>
+              <p className="text-[11px] text-white/70 leading-relaxed">
+                Para manter a alta qualidade em Full HD / 4K sem marcas ou gravações de cinema, a Love Flix aguarda o lançamento oficial. Assim que sair no digital, ele entrará automaticamente aqui no catálogo!
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={closeWatchModal}
+              className="w-full py-3 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white shadow-lg transition-colors cursor-pointer"
+            >
+              Entendido
+            </button>
+          </div>
+        ) : noChannelsAvailable ? (
           <div className="py-3 text-center space-y-4">
             <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed">
               Este título ou episódio ainda não está disponível nos canais de transmissão no momento.

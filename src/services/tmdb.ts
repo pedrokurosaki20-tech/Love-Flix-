@@ -254,8 +254,107 @@ function tagMediaType(
   };
 }
 
+let cachedCinemaOnlyIds: Set<string> | null = null;
+let cinemaOnlyExpiresAt = 0;
+let inFlightCinemaFilter: Promise<Set<string>> | null = null;
+
+export async function getCinemaOnlyIds(): Promise<Set<string>> {
+  if (cachedCinemaOnlyIds && cinemaOnlyExpiresAt > Date.now()) {
+    return cachedCinemaOnlyIds;
+  }
+  if (inFlightCinemaFilter) {
+    return inFlightCinemaFilter;
+  }
+  inFlightCinemaFilter = (async () => {
+    try {
+      const res = await fetch('/api/supercdn/cinema-filter');
+      if (res.ok) {
+        const json = (await res.json()) as { ok: boolean; cinemaOnlyIds?: (string | number)[] };
+        const set = new Set<string>((json.cinemaOnlyIds || []).map(String));
+        cachedCinemaOnlyIds = set;
+        cinemaOnlyExpiresAt = Date.now() + 10 * 60 * 1000;
+        return set;
+      }
+    } catch {
+      // ignore
+    }
+    return cachedCinemaOnlyIds || new Set<string>();
+  })();
+
+  try {
+    return await inFlightCinemaFilter;
+  } finally {
+    inFlightCinemaFilter = null;
+  }
+}
+
+export async function isCinemaOnlyMovie(tmdbId: string | number): Promise<boolean> {
+  const ids = await getCinemaOnlyIds();
+  return ids.has(String(tmdbId));
+}
+
+async function sanitizeMediaList(
+  response: TMDBPaginatedResponse<TMDBMediaItem>,
+  defaultType?: MediaType
+): Promise<TMDBPaginatedResponse<TMDBMediaItem>> {
+  const tagged = defaultType ? tagMediaType(response, defaultType) : response;
+  const cinemaIds = await getCinemaOnlyIds();
+  const today = new Date().toISOString().slice(0, 10);
+
+  const cleanResults = (tagged.results || []).filter((item) => {
+    if (!item || !item.id) return false;
+    const resolvedType = resolveMediaType(item, defaultType);
+    if (resolvedType === 'tv' || resolvedType === 'person') {
+      return true;
+    }
+    // Filter out movies strictly in theaters without digital stream
+    if (cinemaIds.has(String(item.id))) {
+      return false;
+    }
+    // Filter out unreleased future movies
+    if (item.release_date && item.release_date > today) {
+      return false;
+    }
+    return true;
+  });
+
+  return {
+    ...tagged,
+    results: cleanResults,
+  };
+}
+
 export const tmdbService = {
-  // Trending
+  // Check if a specific movie is currently exclusive to movie theaters
+  async isCinemaOnly(tmdbId: string | number): Promise<boolean> {
+    return isCinemaOnlyMovie(tmdbId);
+  },
+
+  async getCinemaOnlyIds(): Promise<Set<string>> {
+    return getCinemaOnlyIds();
+  },
+
+  // Recent Digital / Streaming Releases (movies with confirmed digital releases in HD)
+  async getRecentDigitalReleases(page = 1): Promise<TMDBPaginatedResponse<TMDBMediaItem>> {
+    const today = new Date();
+    const windowStart = new Date(today.getTime() - 120 * 24 * 60 * 60 * 1000);
+    const todayStr = today.toISOString().slice(0, 10);
+    const pastStr = windowStart.toISOString().slice(0, 10);
+
+    return this.discoverMovies(
+      {
+        sortBy: 'popularity.desc',
+        page,
+      },
+      {
+        'primary_release_date.gte': pastStr,
+        'primary_release_date.lte': todayStr,
+        with_release_type: '4|5',
+      }
+    );
+  },
+
+  // Trending (sanitized: cinema-only movies filtered out)
   async getTrending(
     mediaType: 'all' | 'movie' | 'tv' = 'all',
     timeWindow: 'day' | 'week' = 'week',
@@ -266,15 +365,16 @@ export const tmdbService = {
       { page }
     );
     if (mediaType === 'movie' || mediaType === 'tv') {
-      return tagMediaType(res, mediaType);
+      return sanitizeMediaList(res, mediaType);
     }
-    return {
+    const nonPerson = {
       ...res,
       results: (res.results || []).filter((item) => item.media_type !== 'person'),
     };
+    return sanitizeMediaList(nonPerson);
   },
 
-  // Standard Movie Lists
+  // Standard Movie Lists (sanitized: cinema-only movies filtered out)
   async getMoviesList(
     category: 'popular' | 'now_playing' | 'upcoming' | 'top_rated',
     page = 1,
@@ -284,7 +384,7 @@ export const tmdbService = {
       page,
       region,
     });
-    return tagMediaType(res, 'movie');
+    return sanitizeMediaList(res, 'movie');
   },
 
   // Standard TV Lists
@@ -298,7 +398,7 @@ export const tmdbService = {
     return tagMediaType(res, 'tv');
   },
 
-  // Advanced Movie Discovery
+  // Advanced Movie Discovery (sanitized: cinema-only movies filtered out)
   async discoverMovies(
     filters: DiscoverFilterParams = {},
     extraParams: Record<string, string | number | undefined> = {}
@@ -335,7 +435,7 @@ export const tmdbService = {
     }
 
     const res = await fetchTMDB<TMDBPaginatedResponse<TMDBMediaItem>>('discover/movie', params);
-    return tagMediaType(res, 'movie');
+    return sanitizeMediaList(res, 'movie');
   },
 
   // Advanced TV Discovery
@@ -687,10 +787,11 @@ export const tmdbService = {
 
   // Global & Scoped Search
   async searchMulti(query: string, page = 1): Promise<TMDBPaginatedResponse<TMDBMediaItem>> {
-    return fetchTMDB<TMDBPaginatedResponse<TMDBMediaItem>>('search/multi', {
+    const res = await fetchTMDB<TMDBPaginatedResponse<TMDBMediaItem>>('search/multi', {
       query,
       page,
     });
+    return sanitizeMediaList(res);
   },
 
   async searchMovies(query: string, page = 1): Promise<TMDBPaginatedResponse<TMDBMediaItem>> {
@@ -698,7 +799,7 @@ export const tmdbService = {
       query,
       page,
     });
-    return tagMediaType(res, 'movie');
+    return sanitizeMediaList(res, 'movie');
   },
 
   async searchTV(query: string, page = 1): Promise<TMDBPaginatedResponse<TMDBMediaItem>> {
