@@ -198,8 +198,9 @@ async function fetchTMDB<T>(
   const queryString = searchParams.toString();
   const url = `/api/tmdb/${cleanEndpoint}${queryString ? `?${queryString}` : ''}`;
 
+  const isSearchEndpoint = cleanEndpoint.startsWith('search/');
   const cached = clientCache.get(url);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!isSearchEndpoint && cached && cached.expiresAt > Date.now()) {
     return cached.data as T;
   }
 
@@ -229,7 +230,7 @@ async function fetchTMDB<T>(
       const data = (await response.json()) as T;
       clientCache.set(url, {
         data,
-        expiresAt: Date.now() + CLIENT_CACHE_TTL,
+        expiresAt: Date.now() + (isSearchEndpoint ? 5 * 1000 : CLIENT_CACHE_TTL),
       });
       return data;
     } finally {
@@ -289,8 +290,27 @@ export async function getCinemaOnlyIds(): Promise<Set<string>> {
 }
 
 export async function isCinemaOnlyMovie(tmdbId: string | number): Promise<boolean> {
+  const idStr = String(tmdbId).trim();
+  if (!idStr || !/^\d+$/.test(idStr)) return false;
+
   const ids = await getCinemaOnlyIds();
-  return ids.has(String(tmdbId));
+  if (ids.has(idStr)) return true;
+
+  // Verify single movie in real-time with backend
+  try {
+    const res = await fetch(`/api/supercdn/cinema-status?tmdbId=${idStr}`);
+    if (res.ok) {
+      const data = (await res.json()) as { ok?: boolean; isCinemaOnly?: boolean };
+      if (data.isCinemaOnly) {
+        ids.add(idStr);
+        return true;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return false;
 }
 
 async function sanitizeMediaList(
@@ -751,7 +771,7 @@ export const tmdbService = {
       `${mediaType}/${id}/recommendations`,
       { page }
     );
-    return tagMediaType(res, mediaType);
+    return sanitizeMediaList(res, mediaType);
   },
 
   // Fetch Collection / Franchise

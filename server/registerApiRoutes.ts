@@ -18,7 +18,11 @@ import {
   resolveStreamWithFallback,
 } from './supercdnResolver.js';
 import { registerExternalBridgeRoutes } from './externalRoomBridge.js';
-import { getCinemaFilterState, isMovieCinemaOnly } from './cinemaFilter.js';
+import {
+  getCinemaFilterState,
+  isMovieCinemaOnly,
+  isMovieExcludedFromPlatform,
+} from './cinemaFilter.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -127,12 +131,16 @@ export function registerApiRoutes(app: Express): void {
         targetUrl.searchParams.set('include_adult', 'false');
       }
 
+      const isSearch = cleanPath.startsWith('search/');
       const cacheKey = `${cleanPath}?${targetUrl.searchParams.toString()}`;
-      const cached = tmdbServerCache.get(cacheKey);
-      if (cached && cached.expiresAt > Date.now()) {
-        res.setHeader('X-LoveFlix-Cache', 'HIT');
-        res.status(cached.status).json(cached.data);
-        return;
+
+      if (!isSearch) {
+        const cached = tmdbServerCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+          res.setHeader('X-LoveFlix-Cache', 'HIT');
+          res.status(cached.status).json(cached.data);
+          return;
+        }
       }
 
       targetUrl.searchParams.set('api_key', apiKey);
@@ -157,16 +165,27 @@ export function registerApiRoutes(app: Express): void {
 
       if (upstream.ok) {
         if (
+          cleanPath.startsWith('search/') ||
           cleanPath.startsWith('movie/now_playing') ||
-          cleanPath.startsWith('movie/upcoming')
+          cleanPath.startsWith('movie/upcoming') ||
+          cleanPath.startsWith('trending/') ||
+          cleanPath.startsWith('discover/movie') ||
+          cleanPath.startsWith('movie/popular') ||
+          cleanPath.startsWith('movie/top_rated')
         ) {
           try {
-            const cinemaState = await getCinemaFilterState();
             if (payload && typeof payload === 'object' && Array.isArray((payload as Record<string, unknown>).results)) {
-              const resList = (payload as { results: Array<{ id: number }> }).results;
-              (payload as { results: Array<{ id: number }> }).results = resList.filter(
-                (item) => item && !cinemaState.cinemaOnlyIds.has(String(item.id))
+              const resList = (payload as { results: Array<{ id: number; release_date?: string; media_type?: string }> }).results;
+              const exclusionChecks = await Promise.all(
+                resList.map((item) => (item ? isMovieExcludedFromPlatform(item) : Promise.resolve(true)))
               );
+              const filtered: typeof resList = [];
+              for (let i = 0; i < resList.length; i++) {
+                if (!exclusionChecks[i]) {
+                  filtered.push(resList[i]);
+                }
+              }
+              (payload as { results: typeof filtered }).results = filtered;
             }
           } catch {
             // ignore
@@ -177,10 +196,13 @@ export function registerApiRoutes(app: Express): void {
         tmdbServerCache.set(cacheKey, {
           status: upstream.status,
           data: payload,
-          expiresAt: Date.now() + CACHE_TTL_MS,
+          expiresAt: Date.now() + (isSearch ? 30 * 1000 : CACHE_TTL_MS),
         });
       }
 
+      if (isSearch) {
+        res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+      }
       res.setHeader('X-LoveFlix-Cache', 'MISS');
       res.status(upstream.status).json(payload);
     } catch (error) {

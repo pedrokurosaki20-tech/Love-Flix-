@@ -110,10 +110,24 @@ export const SearchPage: React.FC = () => {
         const res = await tmdbService.searchMulti(debouncedQuery, page);
         if (cancelled) return;
 
+        const filtered = (res.results || []).filter((item) => {
+          if (!item || !item.id) return false;
+          const today = new Date().toISOString().slice(0, 10);
+          if (
+            item.media_type !== 'tv' &&
+            item.media_type !== 'person' &&
+            item.release_date &&
+            item.release_date > today
+          ) {
+            return false;
+          }
+          return true;
+        });
+
         if (page === 1) {
-          setResults(res.results || []);
+          setResults(filtered);
         } else {
-          setResults((prev) => [...prev, ...(res.results || [])]);
+          setResults((prev) => [...prev, ...filtered]);
         }
         setTotalPages(Math.min(res.total_pages || 1, 500));
       } catch {

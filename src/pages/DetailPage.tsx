@@ -102,7 +102,9 @@ export const MediaDetailPage: React.FC<{
         if (cancelled) return;
         setDetail(data);
         setIsCinemaExclusive(cinemaOnly);
-        recordHistoryVisit(data, 'viewed');
+        if (!cinemaOnly) {
+          recordHistoryVisit(data, 'viewed');
+        }
 
         const ytVideos = (data.videos?.results || []).filter(
           (v) => v.site === 'YouTube' && v.key
@@ -209,6 +211,30 @@ export const MediaDetailPage: React.FC<{
           className="px-5 py-2.5 rounded-xl bg-[#E50914] text-xs font-bold text-white cursor-pointer"
         >
           Voltar ao Início
+        </button>
+      </div>
+    );
+  }
+
+  if (isCinemaExclusive) {
+    return (
+      <div className="px-4 sm:px-6 lg:px-10 py-24 text-center max-w-md mx-auto">
+        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
+          <Clapperboard className="w-7 h-7" />
+        </div>
+        <h2 className="font-display text-xl sm:text-2xl font-bold text-white mb-2">
+          Disponível somente nos cinemas
+        </h2>
+        <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed mb-6">
+          Este filme ainda está em exibição somente nos cinemas e não está liberado para plataformas digitais.
+          Ele entrará automaticamente no Love Flix assim que for lançado digitalmente e estiver disponível em nossos canais!
+        </p>
+        <button
+          type="button"
+          onClick={() => navigateToPage('movies')}
+          className="px-6 py-3 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs sm:text-sm font-bold text-white transition-colors cursor-pointer shadow-lg"
+        >
+          Explorar filmes disponíveis
         </button>
       </div>
     );
