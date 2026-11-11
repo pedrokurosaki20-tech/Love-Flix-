@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerApiRoutes } from './server/registerApiRoutes.js';
+import { filterTmdbMovieLists } from './server/movieVisibilityMiddleware.js';
 import { attachExternalBridgeWebSocketServer } from './server/externalBridgeSocket.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,6 +26,7 @@ async function startServer() {
   const httpServer = http.createServer(app);
   attachExternalBridgeWebSocketServer(httpServer);
 
+  app.use(filterTmdbMovieLists);
   registerApiRoutes(app);
 
   const isProduction = process.env.NODE_ENV === 'production';
