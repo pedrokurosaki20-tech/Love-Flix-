@@ -142,6 +142,7 @@ export function attachExternalBridgeWebSocketServer(httpServer: HttpServer): voi
         room.peers.set(peerId, {
           peerId,
           name,
+          avatarSrc: typeof msg.avatarSrc === 'string' ? msg.avatarSrc : undefined,
           source,
           joinedAtMs: room.peers.get(peerId)?.joinedAtMs || now,
           lastSeenMs: now,

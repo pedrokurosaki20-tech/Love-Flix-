@@ -52,6 +52,7 @@ export interface ExternalRoomPlayback {
 export interface ExternalRoomPeer {
   peerId: string;
   name: string;
+  avatarSrc?: string;
   source: 'loveflix' | 'external';
   joinedAtMs: number;
   lastSeenMs: number;

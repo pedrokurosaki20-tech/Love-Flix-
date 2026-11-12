@@ -60,6 +60,7 @@ export interface BridgePlaybackState {
 export interface BridgePeerInfo {
   peerId: string;
   name: string;
+  avatarSrc?: string;
   source: 'loveflix' | 'external';
   joinedAtMs: number;
   lastSeenMs: number;

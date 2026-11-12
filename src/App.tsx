@@ -7,7 +7,7 @@ import React from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { UserDataProvider, useUserData } from './context/UserDataContext';
 import { NavigationProvider, useNavigation } from './context/NavigationContext';
-import { ExternalRoomProvider } from './context/ExternalRoomContext';
+import { ExternalRoomProvider, useExternalRoom } from './context/ExternalRoomContext';
 import { Header } from './components/Header';
 import { FloatingDock } from './components/FloatingDock';
 import { Footer } from './components/Footer';
@@ -34,6 +34,7 @@ import {
 const AppWorkspace: React.FC = () => {
   const { route } = useNavigation();
   const { isLoggedIn, isProfileSelected } = useUserData();
+  const { isConnected, isPickerMode } = useExternalRoom();
 
   // 1. Caso o usuário não esteja logado, exige login ou cadastro para entrar
   if (!isLoggedIn) {
@@ -69,7 +70,13 @@ const AppWorkspace: React.FC = () => {
     return <WhoIsWatchingScreen />;
   }
 
+  const isActiveWatchRoom = isConnected && !isPickerMode;
+
   const renderPage = () => {
+    if (isActiveWatchRoom) {
+      return <SessaoFlixPage />;
+    }
+
     switch (route.page) {
       case 'home':
         return <HomePage />;
@@ -106,15 +113,20 @@ const AppWorkspace: React.FC = () => {
     }
   };
 
-  const pageTransitionKey = `${route.page}-${route.mediaType || ''}-${route.id || ''}`;
+  const pageTransitionKey = isActiveWatchRoom
+    ? 'active-watch-room'
+    : `${route.page}-${route.mediaType || ''}-${route.id || ''}`;
 
   return (
-    <div className="min-h-screen bg-[#080808] text-white flex flex-col">
-      {/* Top Brand & Horizontal Category Carousel */}
-      <Header />
+    <div
+      className={`bg-[#080808] text-white flex flex-col ${
+        isActiveWatchRoom ? 'h-[100dvh] overflow-hidden' : 'min-h-screen'
+      }`}
+    >
+      {!isActiveWatchRoom && <Header />}
 
       {/* Main Streaming Viewport */}
-      <main className="flex-1 min-w-0">
+      <main className={`flex-1 min-w-0 ${isActiveWatchRoom ? 'min-h-0' : ''}`}>
         <AnimatePresence mode="wait">
           <motion.div
             key={pageTransitionKey}
@@ -128,12 +140,16 @@ const AppWorkspace: React.FC = () => {
         </AnimatePresence>
       </main>
 
-      <Footer />
+      {!isActiveWatchRoom && <Footer />}
 
       {/* Floating Capsule Dock & Interactive Modals */}
-      <FloatingDock />
-      <StreamingPlayerModal />
-      <OverlayWidgets />
+      {!isActiveWatchRoom && (
+        <>
+          <FloatingDock />
+          <StreamingPlayerModal />
+          <OverlayWidgets />
+        </>
+      )}
     </div>
   );
 };

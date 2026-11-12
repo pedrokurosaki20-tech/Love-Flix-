@@ -125,10 +125,11 @@ function postCrossWindowBridgeMessage(payload: Record<string, unknown>): void {
 
 export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { activePlayer, startPlayerSession } = useNavigation();
-  const { pushToast, profile } = useUserData();
+  const { profile } = useUserData();
 
   const peerId = useMemo(getOrCreatePeerId, []);
   const [config, setConfig] = useState<StoredConnectionConfig | null>(loadSavedConnection);
+  const configRef = useRef<StoredConnectionConfig | null>(config);
   const [connecting, setConnecting] = useState(false);
   const [syncedMedia, setSyncedMedia] = useState<ExternalRoomMedia | null>(null);
   const [syncedPlayback, setSyncedPlayback] = useState<ExternalRoomPlayback | null>(null);
@@ -142,6 +143,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const externalWsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsRetryCountRef = useRef<number>(0);
+  const pendingChatMessagesRef = useRef<Array<{ roomId: string; text: string }>>([]);
   const applyingRemoteMediaRef = useRef<boolean>(false);
   const activePlayerRef = useRef(activePlayer);
   activePlayerRef.current = activePlayer;
@@ -289,6 +291,10 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         };
 
         seqRef.current = 0;
+        configRef.current = nextConfig;
+        pendingChatMessagesRef.current = pendingChatMessagesRef.current.filter(
+          (message) => message.roomId === cleanRoomId
+        );
         saveConnectionConfig(nextConfig);
         setConfig(nextConfig);
 
@@ -310,7 +316,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         setConnecting(false);
       }
     },
-    [ingestRoomSnapshot, peerId]
+    [ingestRoomSnapshot, peerId, profile?.avatarSrc, profile?.name]
   );
 
   const disconnectExternalRoom = useCallback(() => {
@@ -338,6 +344,8 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       externalWsRef.current = null;
     }
 
+    configRef.current = null;
+    pendingChatMessagesRef.current = [];
     setConfig(null);
     setSyncedMedia(null);
     setSyncedPlayback(null);
@@ -371,7 +379,8 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const sendChatMessage = useCallback(
     (text: string) => {
       const clean = text.trim();
-      if (!clean || !config?.roomId) return;
+      const activeConfig = configRef.current;
+      if (!clean || !activeConfig?.roomId) return;
       const currentUserName = profile?.name || 'Espectador Flix';
       const localMsg: ChatMessage = {
         id: `msg_local_${Date.now()}`,
@@ -386,13 +395,15 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         serverWsRef.current.send(
           JSON.stringify({
             type: 'chat:send',
-            roomId: config.roomId,
+            roomId: activeConfig.roomId,
             text: clean,
           })
         );
+      } else {
+        pendingChatMessagesRef.current.push({ roomId: activeConfig.roomId, text: clean });
       }
     },
-    [config?.roomId, peerId, profile?.name]
+    [peerId, profile?.name]
   );
 
   const sendReaction = useCallback(
@@ -555,9 +566,25 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
             roomId: config.roomId,
             peerId,
             name: myName,
+            avatarSrc: profile?.avatarSrc,
             source: 'loveflix',
           })
         );
+        const queuedMessages = pendingChatMessagesRef.current.filter(
+          (message) => message.roomId === config.roomId
+        );
+        pendingChatMessagesRef.current = pendingChatMessagesRef.current.filter(
+          (message) => message.roomId !== config.roomId
+        );
+        queuedMessages.forEach((message) => {
+          ws.send(
+            JSON.stringify({
+              type: 'chat:send',
+              roomId: message.roomId,
+              text: message.text,
+            })
+          );
+        });
       };
 
       ws.onmessage = (ev) => {
@@ -606,6 +633,16 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
             const chatMsg = msg.message as ChatMessage;
             setChatMessages((prev) => {
               if (prev.some((m) => m.id === chatMsg.id)) return prev;
+              const localMessageIndex = prev.findIndex(
+                (message) =>
+                  message.id.startsWith('msg_local_') &&
+                  message.peerId === chatMsg.peerId &&
+                  message.text === chatMsg.text
+              );
+              if (localMessageIndex >= 0) {
+                const next = prev.filter((_, index) => index !== localMessageIndex);
+                return [...next.slice(-60), chatMsg];
+              }
               return [...prev.slice(-60), chatMsg];
             });
             return;
@@ -726,21 +763,24 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
     config,
     ingestRoomSnapshot,
     peerId,
+    profile?.avatarSrc,
+    profile?.name,
   ]);
 
   const syncMediaToExternalRoom = useCallback(
     async (selection: ExternalMediaSelectionInput): Promise<ExternalRoomMedia | null> => {
-      if (!config) return null;
+      const activeConfig = configRef.current;
+      if (!activeConfig) return null;
       const eventId = `media-${peerId}-${Date.now()}`;
 
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (config.sessionToken) {
-          headers['X-Bridge-Token'] = config.sessionToken;
+        if (activeConfig.sessionToken) {
+          headers['X-Bridge-Token'] = activeConfig.sessionToken;
         }
 
         const res = await fetch(
-          `/api/bridge/rooms/${encodeURIComponent(config.roomId)}/media`,
+          `/api/bridge/rooms/${encodeURIComponent(activeConfig.roomId)}/media`,
           {
             method: 'POST',
             headers,
@@ -765,13 +805,13 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           // Emit both event names so parent room iframe or popup catches selection in 0ms
           postCrossWindowBridgeMessage({
             type: 'LOVEFLIX_MEDIA_SELECTED',
-            roomId: config.roomId,
+            roomId: activeConfig.roomId,
             media: resolvedMedia,
             playback: data.room.playback,
           });
           postCrossWindowBridgeMessage({
             type: 'LOVEFLIX_ROOM_MEDIA',
-            roomId: config.roomId,
+            roomId: activeConfig.roomId,
             media: resolvedMedia,
             playback: data.room.playback,
           });
@@ -780,7 +820,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
             externalWsRef.current.send(
               JSON.stringify({
                 type: 'loveflix:media',
-                roomId: config.roomId,
+                roomId: activeConfig.roomId,
                 media: resolvedMedia,
                 playback: data.room.playback,
               })
@@ -792,7 +832,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         return null;
       }
     },
-    [config, peerId, pushToast]
+    [peerId]
   );
 
   const syncPlaybackToExternalRoom = useCallback(

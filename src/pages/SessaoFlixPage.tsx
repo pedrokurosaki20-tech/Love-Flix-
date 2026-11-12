@@ -2,24 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Check,
-  ChevronRight,
   Clapperboard,
   Copy,
-  ExternalLink,
   Flame,
   Loader2,
   LogOut,
-  Maximize2,
-  Minimize2,
   Play,
   Radio,
   Search,
   Send,
-  Sparkles,
-  Tv,
+  UserRound,
   Users,
-  Volume2,
-  VolumeX,
+  X,
 } from 'lucide-react';
 import { useExternalRoom } from '../context/ExternalRoomContext';
 import { useNavigation } from '../context/NavigationContext';
@@ -32,12 +26,26 @@ import {
   isCinemaOnlyMovie,
 } from '../services/tmdb';
 import type { TMDBMediaItem, TMDBMediaDetail, TMDBSeasonDetail, TMDBEpisode } from '../types/tmdb';
+import { LOVEFLIX_PRESET_AVATARS } from '../utils/avatars';
 
 const CHANNELS: Array<{ id: 1 | 2 | 3; label: string; desc: string }> = [
   { id: 1, label: 'Canal 1', desc: 'Embed Primário' },
   { id: 2, label: 'Canal 2', desc: 'SuperFlix HD' },
   { id: 3, label: 'Canal 3', desc: 'StreamBetter Rápido' },
 ];
+
+function buildSessionWelcomeMessage(roomId: string): string {
+  return `🎬 Sua sessão está pronta!
+A sala já está aberta. Agora só falta reunir quem vai assistir com você!
+🍿 Compartilhe o ID da sala com seus amigos e convide todo mundo para essa experiência.
+ID DA SALA
+#${roomId}
+❤️ Boas sessões começam com boas companhias.`;
+}
+
+function isSessionWelcomeMessage(text: string): boolean {
+  return text.startsWith('🎬 Sua sessão está pronta!\n') && text.includes('\nID DA SALA\n#');
+}
 
 export const SessaoFlixPage: React.FC = () => {
   const { route } = useNavigation();
@@ -91,14 +99,9 @@ export const SessaoFlixPage: React.FC = () => {
   // Player state inside the room
   const [currentChannel, setCurrentChannel] = useState<1 | 2 | 3>(2);
   const [iframeLoading, setIframeLoading] = useState(true);
-  const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
-
-  // Orientation state to hide chat in landscape mode on mobile/tablets
-  const [isLandscape, setIsLandscape] = useState(false);
+  const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  const playerScreenRef = useRef<HTMLDivElement | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   // Keep player channel in sync with room state
   useEffect(() => {
@@ -106,36 +109,6 @@ export const SessaoFlixPage: React.FC = () => {
       setCurrentChannel(syncedMedia.channel);
     }
   }, [syncedMedia?.channel]);
-
-  // Orientation detector (matches media query or screen dimensions)
-  useEffect(() => {
-    const checkOrientation = () => {
-      if (typeof window === 'undefined') return;
-      const mql = window.matchMedia('(orientation: landscape)');
-      // If width > height and viewport is mobile/tablet size, or orientation is landscape
-      const landscape =
-        mql.matches &&
-        (window.innerWidth <= 1024 || window.innerHeight <= 600 || window.matchMedia('(hover: none) and (pointer: coarse)').matches);
-      setIsLandscape(landscape);
-    };
-
-    checkOrientation();
-    window.addEventListener('resize', checkOrientation);
-    window.addEventListener('orientationchange', checkOrientation);
-    return () => {
-      window.removeEventListener('resize', checkOrientation);
-      window.removeEventListener('orientationchange', checkOrientation);
-    };
-  }, []);
-
-  // Track native fullscreen
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      setIsNativeFullscreen(Boolean(document.fullscreenElement));
-    };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-  }, []);
 
   // Auto-connect if arrived via ?sala=... or route query
   useEffect(() => {
@@ -317,7 +290,10 @@ export const SessaoFlixPage: React.FC = () => {
 
   // Final step: Confirm channel and launch the room
   const handleConfirmAndOpenRoom = async () => {
-    if (!selectedItem) return;
+    if (!selectedItem) {
+      pushToast('Selecione um filme ou série antes de abrir a sala.');
+      return;
+    }
     setIsSubmitting(true);
     try {
       // 1. Create a new room code
@@ -331,7 +307,7 @@ export const SessaoFlixPage: React.FC = () => {
       const title = getMediaTitle(selectedItem);
 
       // 2. Put the selected movie/series directly into the created room
-      await syncMediaToExternalRoom({
+      const synced = await syncMediaToExternalRoom({
         mediaType,
         tmdbId: selectedItem.id,
         title,
@@ -342,6 +318,13 @@ export const SessaoFlixPage: React.FC = () => {
         channel: selectedChannel,
       });
 
+      if (!synced) {
+        pushToast('Não foi possível carregar o conteúdo na sala.');
+        disconnectExternalRoom();
+        return;
+      }
+
+      sendChatMessage(buildSessionWelcomeMessage(newRoomId));
       pushToast(`Sala ${newRoomId} aberta com sucesso!`, 'accent');
       setFlowState('initial');
       setSelectedItem(null);
@@ -351,17 +334,15 @@ export const SessaoFlixPage: React.FC = () => {
     }
   };
 
-  // Copy share invite link
-  const handleCopyInviteLink = async () => {
+  const handleCopyRoomId = async () => {
     if (!roomId) return;
-    const shareUrl = `${window.location.origin}/sessao-flix?sala=${encodeURIComponent(roomId)}`;
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await navigator.clipboard.writeText(roomId);
       setCopiedLink(true);
-      pushToast('Link da sala copiado com sucesso!', 'accent');
+      pushToast('ID da sala copiado com sucesso!', 'accent');
       setTimeout(() => setCopiedLink(false), 2500);
     } catch {
-      pushToast(shareUrl);
+      pushToast(`ID da sala: ${roomId}`);
     }
   };
 
@@ -371,42 +352,6 @@ export const SessaoFlixPage: React.FC = () => {
     if (!chatInput.trim()) return;
     sendChatMessage(chatInput);
     setChatInput('');
-  };
-
-  // Switch channel directly in player
-  const handleSwitchChannelInRoom = (channel: 1 | 2 | 3) => {
-    setCurrentChannel(channel);
-    setIframeLoading(true);
-    if (syncedMedia) {
-      void syncMediaToExternalRoom({
-        ...syncedMedia,
-        channel,
-      });
-    }
-  };
-
-  // Fullscreen controls
-  const handleToggleFullscreen = () => {
-    if (document.fullscreenElement) {
-      try {
-        if (typeof document.exitFullscreen === 'function') {
-          document.exitFullscreen().catch(() => {});
-        }
-      } catch {
-        // ignore
-      }
-    } else if (playerScreenRef.current) {
-      try {
-        const el = playerScreenRef.current as any;
-        if (typeof el.requestFullscreen === 'function') {
-          el.requestFullscreen().catch(() => {});
-        } else if (typeof el.webkitRequestFullscreen === 'function') {
-          el.webkitRequestFullscreen();
-        }
-      } catch {
-        // ignore
-      }
-    }
   };
 
   // Compute stream URL for iframe
@@ -426,116 +371,48 @@ export const SessaoFlixPage: React.FC = () => {
     return `/api/supercdn/stream?${streamParams.toString()}`;
   }, [syncedMedia, currentChannel]);
 
+  useEffect(() => {
+    setIframeLoading(true);
+  }, [streamSrc]);
+
   // =========================================================================
-  // VIEW A: INSIDE ACTIVE ROOM (Player on top, comfortable clean chat below)
+  // VIEW A: DEDICATED WATCH ROOM
   // =========================================================================
   if (isConnected && roomId) {
     return (
-      <div
-        ref={playerScreenRef}
-        className="w-full min-h-[calc(100vh-64px)] bg-[#0A0A0A] text-white flex flex-col"
-      >
-        {/* Top Slim Room Bar */}
-        <header className="h-12 px-4 sm:px-6 bg-[#0E0E0E] border-b border-white/[0.08] flex items-center justify-between gap-3 shrink-0 z-20">
-          <div className="flex items-center gap-3 min-w-0">
-            <button
-              type="button"
-              onClick={disconnectExternalRoom}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181818] hover:bg-[#E50914] text-white text-xs font-bold border border-white/10 transition-colors cursor-pointer shrink-0"
-              title="Sair da sala"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>Sair</span>
-            </button>
+      <div className="fixed inset-0 z-[100] flex h-[100dvh] w-full flex-col overflow-hidden bg-[#050505] text-white">
+        <main className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
+          <section className="relative min-h-0 flex-1 bg-black">
+            <div className="absolute left-3 right-3 top-3 z-20 flex items-center justify-between gap-3 sm:left-5 sm:right-5 sm:top-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsParticipantsOpen(false);
+                  disconnectExternalRoom();
+                }}
+                className="inline-flex h-10 items-center gap-2 rounded-full border border-white/15 bg-black/60 px-4 text-sm font-bold text-white backdrop-blur-md transition-colors hover:bg-[#E50914] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
+                title="Sair da sala"
+              >
+                <LogOut className="h-4 w-4" />
+                <span>Sair</span>
+              </button>
 
-            <div className="flex items-center gap-2 truncate">
-              <span className="text-[11px] font-bold text-[#A1A1A1] uppercase tracking-wider hidden sm:inline">
-                Sala:
-              </span>
-              <span className="font-mono text-xs sm:text-sm font-extrabold text-[#E50914] bg-white/[0.05] px-2 py-0.5 rounded border border-white/10">
-                {roomId}
-              </span>
-              {syncedMedia && (
-                <span className="text-xs text-white/90 font-semibold truncate hidden md:inline">
-                  • {syncedMedia.title}
-                  {syncedMedia.mediaType === 'tv' && syncedMedia.season
-                    ? ` (T${syncedMedia.season}:E${syncedMedia.episode || 1})`
-                    : ''}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            {/* Copy invite link */}
-            <button
-              type="button"
-              onClick={handleCopyInviteLink}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-white text-xs font-semibold border border-white/10 transition-colors cursor-pointer"
-            >
-              {copiedLink ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400 font-bold">Copiado</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3.5 h-3.5 text-[#E50914]" />
-                  <span className="hidden xs:inline">Convidar</span>
-                </>
-              )}
-            </button>
-
-            {/* Peers count */}
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs font-semibold text-[#A1A1A1]">
-              <Users className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{peers.length}</span>
+              <button
+                type="button"
+                onClick={() => setIsParticipantsOpen(true)}
+                aria-label="Abrir participantes"
+                aria-expanded={isParticipantsOpen}
+                className="relative flex h-10 w-12 items-center justify-center rounded-full border border-white/15 bg-black/60 text-[#FF6470] backdrop-blur-md transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
+                title="Participantes"
+              >
+                <UserRound className="absolute left-[10px] top-[11px] h-4 w-4 fill-[#E50914]/25" />
+                <UserRound className="absolute right-[9px] top-[13px] h-3.5 w-3.5 fill-[#FF6470]/25" />
+              </button>
             </div>
 
-            {/* Toggle Fullscreen */}
-            <button
-              type="button"
-              onClick={handleToggleFullscreen}
-              className="p-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-white transition-colors cursor-pointer"
-              title="Tela Cheia"
-            >
-              {isNativeFullscreen ? (
-                <Minimize2 className="w-4 h-4" />
-              ) : (
-                <Maximize2 className="w-4 h-4" />
-              )}
-            </button>
-          </div>
-        </header>
-
-        {/* Content Container */}
-        <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
-          {/* PLAYER AREA: On portrait/mobile, behaves like YouTube (sticky/top 16:9 screen). On desktop, fills main column */}
-          <div
-            className={`flex flex-col bg-black transition-all ${
-              isLandscape
-                ? 'w-full h-full flex-1'
-                : 'w-full lg:flex-1 lg:h-full shrink-0'
-            }`}
-          >
-            {/* Video Screen Frame */}
-            <div
-              className={`relative bg-black w-full overflow-hidden flex items-center justify-center ${
-                isLandscape
-                  ? 'h-full flex-1'
-                  : 'aspect-video max-h-[42vh] lg:max-h-none lg:h-[calc(100vh-120px)]'
-              }`}
-            >
-              {iframeLoading && streamSrc && (
-                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/85 backdrop-blur-sm gap-2">
-                  <Loader2 className="w-8 h-8 text-[#E50914] animate-spin" />
-                  <p className="text-xs font-bold text-white/80">Carregando transmissão...</p>
-                </div>
-              )}
-
-              {streamSrc ? (
+            {streamSrc ? (
+              <>
                 <iframe
-                  ref={iframeRef}
                   key={`${syncedMedia?.tmdbId}-${syncedMedia?.season || 0}-${syncedMedia?.episode || 0}-${currentChannel}`}
                   src={streamSrc}
                   title={syncedMedia?.title || 'Love Flix Player'}
@@ -546,137 +423,189 @@ export const SessaoFlixPage: React.FC = () => {
                   onLoad={() => setIframeLoading(false)}
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                   allowFullScreen
-                  className="w-full h-full border-0 bg-black"
+                  className="absolute inset-0 h-full w-full border-0 bg-black"
                 />
-              ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-[#A1A1A1] space-y-3">
-                  <Clapperboard className="w-10 h-10 text-white/30" />
-                  <p className="text-sm font-bold text-white">Nenhum conteúdo selecionado</p>
-                  <p className="text-xs text-white/50 max-w-sm">
-                    A sala está aberta e pronta. Escolha um filme ou série para transmitir.
-                  </p>
+                {iframeLoading && (
+                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/85 backdrop-blur-sm">
+                    <Loader2 className="h-8 w-8 animate-spin text-[#E50914]" />
+                    <p className="text-xs font-bold text-white/80">Carregando transmissão...</p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-white/60">
+                {isSubmitting ? (
+                  <Loader2 className="h-8 w-8 animate-spin text-[#E50914]" />
+                ) : (
+                  <Clapperboard className="h-10 w-10 text-white/30" />
+                )}
+                <p className="text-sm font-semibold">
+                  {isSubmitting ? 'Preparando sua sessão...' : 'Aguardando o conteúdo da sessão...'}
+                </p>
+              </div>
+            )}
+          </section>
+
+          <section className="flex min-h-[210px] max-h-[50%] basis-[42%] shrink-0 flex-col overflow-hidden border-t border-white/10 bg-[#0E0E0E] lg:h-auto lg:max-h-none lg:min-h-0 lg:basis-auto lg:shrink lg:border-l lg:border-t-0 lg:w-[360px] xl:w-[400px]">
+            <header className="flex h-12 shrink-0 items-center border-b border-white/[0.08] bg-[#111111] px-4">
+              <span className="text-sm font-bold text-white/90">Chat da Sala</span>
+            </header>
+
+            <div
+              ref={chatScrollRef}
+              className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3.5 no-scrollbar"
+            >
+              {chatMessages.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center p-6 text-center text-[#A1A1A1]/70">
+                  <p className="text-xs font-medium">O chat começa aqui.</p>
                 </div>
+              ) : (
+                chatMessages.map((msg) => {
+                  if (isSessionWelcomeMessage(msg.text)) {
+                    const [headline, intro, invitation, idLabel, idValue, closing] =
+                      msg.text.split('\n');
+                    return (
+                      <article
+                        key={msg.id}
+                        className="mx-auto w-full max-w-sm space-y-3 rounded-2xl border border-[#E50914]/25 bg-gradient-to-br from-[#251012] to-[#151112] p-4 shadow-lg shadow-black/20"
+                      >
+                        <div className="space-y-1.5">
+                          <h2 className="text-sm font-extrabold leading-snug text-white">{headline}</h2>
+                          <p className="text-xs leading-relaxed text-white/75">{intro}</p>
+                          <p className="text-xs leading-relaxed text-white/75">{invitation}</p>
+                        </div>
+                        <div className="rounded-xl border border-[#E50914]/25 bg-black/30 px-3 py-2.5">
+                          <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#FF7A83]">
+                            {idLabel}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={handleCopyRoomId}
+                            className="flex w-full items-center justify-between gap-2 text-left font-mono text-lg font-black tracking-wide text-white hover:text-[#FF7A83]"
+                            title="Copiar ID da sala"
+                          >
+                            <span className="select-all">{idValue}</span>
+                            {copiedLink ? (
+                              <Check className="h-4 w-4 shrink-0 text-emerald-400" />
+                            ) : (
+                              <Copy className="h-4 w-4 shrink-0 text-[#E50914]" />
+                            )}
+                          </button>
+                        </div>
+                        <p className="text-xs font-semibold text-white/85">{closing}</p>
+                      </article>
+                    );
+                  }
+
+                  const isMe = msg.name === (profile?.name || 'Love Flix');
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} space-y-0.5`}
+                    >
+                      <div className="flex items-center gap-1.5 px-1">
+                        <span
+                          className={`text-[11px] font-bold ${
+                            isMe ? 'text-[#E50914]' : 'text-white/80'
+                          }`}
+                        >
+                          {msg.name}
+                        </span>
+                        <span className="text-[9px] text-[#666666]">
+                          {new Date(msg.createdAtMs).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                      <div
+                        className={`max-w-[85%] whitespace-pre-line break-words rounded-2xl px-3.5 py-2 text-xs leading-relaxed ${
+                          isMe
+                            ? 'rounded-tr-none bg-[#E50914] text-white'
+                            : 'rounded-tl-none border border-white/[0.06] bg-[#1D1D1D] text-white/95'
+                        }`}
+                      >
+                        {msg.text}
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
 
-            {/* Quick Channel Bar below video (visible when not in fullscreen/pure landscape) */}
-            {!isLandscape && (
-              <div className="px-4 py-2 bg-[#101010] border-y border-white/[0.06] flex items-center justify-between gap-2 shrink-0">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <Tv className="w-3.5 h-3.5 text-[#E50914] shrink-0" />
-                  <span className="text-[11px] font-bold text-[#A1A1A1] uppercase tracking-wider shrink-0">
-                    Canais:
-                  </span>
-                  <div className="flex items-center gap-1">
-                    {CHANNELS.map((ch) => (
-                      <button
-                        key={ch.id}
-                        type="button"
-                        onClick={() => handleSwitchChannelInRoom(ch.id)}
-                        className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
-                          currentChannel === ch.id
-                            ? 'bg-[#E50914] text-white shadow'
-                            : 'bg-white/[0.05] text-[#A1A1A1] hover:text-white hover:bg-white/[0.1]'
-                        }`}
-                      >
-                        {ch.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="text-[11px] font-medium text-[#A1A1A1] truncate">
-                  {syncedMedia?.title}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* CHAT AREA:
-              - In portrait orientation: Appears right below the video (like YouTube mobile) or side panel on desktop
-              - In landscape orientation: Automatically HIDDEN so the user can enjoy full cinematic movie immersion */}
-          {!isLandscape && (
-            <div className="flex-1 lg:w-96 lg:max-w-md lg:border-l border-white/[0.08] bg-[#0E0E0E] flex flex-col min-h-[300px] lg:h-[calc(100vh-112px)] overflow-hidden">
-              {/* Chat Header */}
-              <div className="px-4 py-2.5 bg-[#141414] border-b border-white/[0.06] flex items-center justify-between shrink-0">
-                <span className="text-xs font-bold text-white/90">Chat da Sala</span>
-                <span className="text-[11px] text-[#A1A1A1] font-medium">
-                  {chatMessages.length} {chatMessages.length === 1 ? 'mensagem' : 'mensagens'}
-                </span>
-              </div>
-
-              {/* Chat Feed */}
-              <div
-                ref={chatScrollRef}
-                className="flex-1 p-3.5 overflow-y-auto space-y-2.5 no-scrollbar min-h-0"
+            <form
+              onSubmit={handleSendChat}
+              className="flex shrink-0 items-center gap-2 border-t border-white/[0.08] bg-[#121212] p-2.5"
+            >
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Conversar na sala..."
+                className="h-10 min-w-0 flex-1 rounded-xl border border-white/10 bg-[#1C1C1C] px-3.5 text-xs text-white placeholder:text-[#A1A1A1] focus:border-[#E50914] focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!chatInput.trim()}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#E50914] text-white transition-transform hover:bg-[#FF253A] active:scale-95 disabled:opacity-40"
+                title="Enviar mensagem"
               >
-                {chatMessages.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center p-6 text-[#A1A1A1]/60 space-y-1.5">
-                    <p className="text-xs font-medium">Nenhuma mensagem ainda.</p>
-                    <p className="text-[11px]">Envie uma mensagem para quem estiver na sala!</p>
+                <Send className="h-4 w-4" />
+              </button>
+            </form>
+          </section>
+        </main>
+
+        {isParticipantsOpen && (
+          <div
+            className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[2px]"
+            role="presentation"
+            onClick={() => setIsParticipantsOpen(false)}
+          >
+            <aside
+              className="absolute bottom-0 right-0 top-0 flex w-[min(88vw,360px)] flex-col border-l border-white/10 bg-[#101010]/95 shadow-2xl backdrop-blur-xl"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Participantes da sala"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <header className="flex h-16 shrink-0 items-center justify-between border-b border-white/[0.08] px-5">
+                <h2 className="text-base font-bold text-white">Participantes</h2>
+                <button
+                  type="button"
+                  onClick={() => setIsParticipantsOpen(false)}
+                  aria-label="Fechar participantes"
+                  className="flex h-9 w-9 items-center justify-center rounded-full text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </header>
+              <div className="flex-1 space-y-2 overflow-y-auto p-4">
+                {peers.map((peer) => (
+                  <div
+                    key={peer.peerId}
+                    className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.05]"
+                  >
+                    <img
+                      src={peer.avatarSrc || LOVEFLIX_PRESET_AVATARS[0].src}
+                      alt=""
+                      className="h-11 w-11 shrink-0 rounded-full border border-[#E50914]/35 object-cover"
+                      onError={(event) => {
+                        event.currentTarget.src = LOVEFLIX_PRESET_AVATARS[0].src;
+                      }}
+                    />
+                    <span className="min-w-0 truncate text-sm font-semibold text-white/90">
+                      {peer.name}
+                    </span>
                   </div>
-                ) : (
-                  chatMessages.map((msg) => {
-                    const isMe = msg.name === (profile?.name || 'Love Flix');
-                    return (
-                      <div
-                        key={msg.id}
-                        className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} space-y-0.5`}
-                      >
-                        <div className="flex items-center gap-1.5 px-1">
-                          <span
-                            className={`text-[11px] font-bold ${
-                              isMe ? 'text-[#E50914]' : 'text-white/80'
-                            }`}
-                          >
-                            {msg.name}
-                          </span>
-                          <span className="text-[9px] text-[#666666]">
-                            {new Date(msg.createdAtMs).toLocaleTimeString([], {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </span>
-                        </div>
-                        <div
-                          className={`max-w-[85%] px-3.5 py-2 rounded-2xl text-xs leading-relaxed break-words ${
-                            isMe
-                              ? 'bg-[#E50914] text-white rounded-tr-none'
-                              : 'bg-[#1D1D1D] text-white/95 border border-white/[0.06] rounded-tl-none'
-                          }`}
-                        >
-                          {msg.text}
-                        </div>
-                      </div>
-                    );
-                  })
+                ))}
+                {peers.length === 0 && (
+                  <p className="px-2 py-4 text-sm text-white/50">Nenhum participante conectado.</p>
                 )}
               </div>
-
-              {/* Chat Input Bar */}
-              <form
-                onSubmit={handleSendChat}
-                className="p-2.5 bg-[#121212] border-t border-white/[0.08] flex items-center gap-2 shrink-0"
-              >
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Conversar na sala..."
-                  className="flex-1 h-10 px-3.5 rounded-xl bg-[#1C1C1C] border border-white/10 text-xs text-white placeholder:text-[#A1A1A1] focus:border-[#E50914] focus:outline-none transition-colors"
-                />
-                <button
-                  type="submit"
-                  disabled={!chatInput.trim()}
-                  className="w-10 h-10 rounded-xl bg-[#E50914] hover:bg-[#FF253A] disabled:opacity-40 disabled:hover:bg-[#E50914] flex items-center justify-center text-white shrink-0 transition-transform active:scale-95 cursor-pointer"
-                  title="Enviar mensagem"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </form>
-            </div>
-          )}
-        </div>
+            </aside>
+          </div>
+        )}
       </div>
     );
   }
