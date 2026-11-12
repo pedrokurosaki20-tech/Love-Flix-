@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
+  addChatMessageToBridgeRoom,
   applyBridgeMediaUpdate,
   applyBridgePlaybackUpdate,
   bridgeRoomsStore,
@@ -213,6 +214,40 @@ export function attachExternalBridgeWebSocketServer(httpServer: HttpServer): voi
           actorId: meta.peerId,
           actorName: meta.name,
         });
+        return;
+      }
+
+      if (type === 'chat:send' && msg.text) {
+        const text = String(msg.text || '').trim();
+        if (text) {
+          const chatMsg = addChatMessageToBridgeRoom(room, {
+            peerId: meta.peerId,
+            name: meta.name,
+            text,
+          });
+          broadcastRoomPayload(meta.roomId, {
+            type: 'chat:message',
+            roomId: meta.roomId,
+            message: chatMsg,
+          });
+        }
+        return;
+      }
+
+      if (type === 'reaction:send' && msg.emoji) {
+        const emoji = String(msg.emoji || '').slice(0, 14);
+        broadcastRoomPayload(meta.roomId, {
+          type: 'reaction:event',
+          roomId: meta.roomId,
+          reaction: {
+            id: `rx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            peerId: meta.peerId,
+            name: meta.name,
+            emoji,
+            createdAtMs: Date.now(),
+          },
+        });
+        return;
       }
     });
 

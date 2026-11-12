@@ -8,6 +8,7 @@ import React, {
   useState,
 } from 'react';
 import type {
+  ChatMessage,
   ExternalMediaSelectionInput,
   ExternalPlaybackAction,
   ExternalRoomConnectOptions,
@@ -15,6 +16,7 @@ import type {
   ExternalRoomPeer,
   ExternalRoomPlayback,
   ExternalRoomSnapshot,
+  ReactionEvent,
 } from '../types/externalRoom';
 import { useNavigation } from './NavigationContext';
 import { useUserData } from './UserDataContext';
@@ -42,9 +44,12 @@ interface ExternalRoomContextValue {
   syncedMedia: ExternalRoomMedia | null;
   syncedPlayback: ExternalRoomPlayback | null;
   peers: ExternalRoomPeer[];
+  chatMessages: ChatMessage[];
+  reactions: ReactionEvent[];
   connectExternalRoom: (
-    options: ExternalRoomConnectOptions & { pickerMode?: boolean }
+    options: ExternalRoomConnectOptions & { pickerMode?: boolean; userName?: string }
   ) => Promise<boolean>;
+  createRoom: (customId?: string) => Promise<string | null>;
   disconnectExternalRoom: () => void;
   syncMediaToExternalRoom: (
     selection: ExternalMediaSelectionInput
@@ -55,6 +60,8 @@ interface ExternalRoomContextValue {
     paused: boolean;
     playbackRate?: number;
   }) => void;
+  sendChatMessage: (text: string) => void;
+  sendReaction: (emoji: string) => void;
   getLiveRoomPositionSec: (overridePlayback?: ExternalRoomPlayback | null) => number;
   subscribeRemotePlayback: (listener: RemotePlaybackListener) => () => void;
   returnToExternalRoomApp: () => void;
@@ -118,7 +125,7 @@ function postCrossWindowBridgeMessage(payload: Record<string, unknown>): void {
 
 export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { activePlayer, startPlayerSession } = useNavigation();
-  const { pushToast } = useUserData();
+  const { pushToast, profile } = useUserData();
 
   const peerId = useMemo(getOrCreatePeerId, []);
   const [config, setConfig] = useState<StoredConnectionConfig | null>(loadSavedConnection);
@@ -126,6 +133,8 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [syncedMedia, setSyncedMedia] = useState<ExternalRoomMedia | null>(null);
   const [syncedPlayback, setSyncedPlayback] = useState<ExternalRoomPlayback | null>(null);
   const [peers, setPeers] = useState<ExternalRoomPeer[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [reactions, setReactions] = useState<ReactionEvent[]>([]);
 
   const seqRef = useRef<number>(0);
   const clockOffsetMsRef = useRef<number>(0);
@@ -218,6 +227,9 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       if (Array.isArray(snapshot.peers)) {
         setPeers(snapshot.peers);
       }
+      if (Array.isArray(snapshot.chatMessages)) {
+        setChatMessages(snapshot.chatMessages);
+      }
       applyAuthoritativeMedia(snapshot.media, snapshot.playback?.actorId);
       if (snapshot.playback) {
         applyAuthoritativePlayback(snapshot.playback, !isInitial);
@@ -228,13 +240,14 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   const connectExternalRoom = useCallback(
     async (
-      options: ExternalRoomConnectOptions & { pickerMode?: boolean }
+      options: ExternalRoomConnectOptions & { pickerMode?: boolean; userName?: string }
     ): Promise<boolean> => {
-      const cleanRoomId = options.roomId.trim();
+      const cleanRoomId = options.roomId.trim().toUpperCase();
       if (!/^[a-zA-Z0-9_-]{3,64}$/.test(cleanRoomId)) {
         return false;
       }
 
+      const activeName = options.userName?.trim() || profile?.name || 'Love Flix';
       setConnecting(true);
       try {
         const headers: Record<string, string> = {
@@ -249,7 +262,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           headers,
           body: JSON.stringify({
             peerId,
-            peerName: 'Love Flix',
+            peerName: activeName,
             source: 'loveflix',
             returnUrl: options.returnUrl?.trim() || undefined,
             webhookUrl: options.webhookUrl?.trim() || undefined,
@@ -329,9 +342,87 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
     setSyncedMedia(null);
     setSyncedPlayback(null);
     setPeers([]);
+    setChatMessages([]);
+    setReactions([]);
     seqRef.current = 0;
     saveConnectionConfig(null);
   }, []);
+
+  const createRoom = useCallback(
+    async (customId?: string): Promise<string | null> => {
+      let code = (customId || '').trim().toUpperCase();
+      if (!code) {
+        const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+        let randomPart = '';
+        for (let i = 0; i < 4; i++) {
+          randomPart += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        code = `FLIX-${randomPart}`;
+      }
+      const success = await connectExternalRoom({
+        roomId: code,
+        userName: profile?.name || 'Love Flix',
+      });
+      return success ? code : null;
+    },
+    [connectExternalRoom, profile?.name]
+  );
+
+  const sendChatMessage = useCallback(
+    (text: string) => {
+      const clean = text.trim();
+      if (!clean || !config?.roomId) return;
+      const currentUserName = profile?.name || 'Espectador Flix';
+      const localMsg: ChatMessage = {
+        id: `msg_local_${Date.now()}`,
+        peerId,
+        name: currentUserName,
+        text: clean,
+        createdAtMs: Date.now(),
+      };
+      setChatMessages((prev) => [...prev.slice(-60), localMsg]);
+
+      if (serverWsRef.current && serverWsRef.current.readyState === WebSocket.OPEN) {
+        serverWsRef.current.send(
+          JSON.stringify({
+            type: 'chat:send',
+            roomId: config.roomId,
+            text: clean,
+          })
+        );
+      }
+    },
+    [config?.roomId, peerId, profile?.name]
+  );
+
+  const sendReaction = useCallback(
+    (emoji: string) => {
+      if (!emoji || !config?.roomId) return;
+      const currentUserName = profile?.name || 'Espectador Flix';
+      const localRx: ReactionEvent = {
+        id: `rx_local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        peerId,
+        name: currentUserName,
+        emoji,
+        createdAtMs: Date.now(),
+      };
+      setReactions((prev) => [...prev.slice(-25), localRx]);
+      setTimeout(() => {
+        setReactions((prev) => prev.filter((r) => r.id !== localRx.id));
+      }, 4000);
+
+      if (serverWsRef.current && serverWsRef.current.readyState === WebSocket.OPEN) {
+        serverWsRef.current.send(
+          JSON.stringify({
+            type: 'reaction:send',
+            roomId: config.roomId,
+            emoji,
+          })
+        );
+      }
+    },
+    [config?.roomId, peerId, profile?.name]
+  );
 
   // Silently establish external room bridge when opened with ?sala=... or ?room=...
   useEffect(() => {
@@ -456,13 +547,14 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           return;
         }
         wsRetryCountRef.current = 0;
+        const myName = profile?.name || 'Love Flix';
         ws.send(JSON.stringify({ type: 'clock:ping', clientSendMs: Date.now() }));
         ws.send(
           JSON.stringify({
             type: 'room:join',
             roomId: config.roomId,
             peerId,
-            name: 'Love Flix',
+            name: myName,
             source: 'loveflix',
           })
         );
@@ -507,6 +599,25 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
           if ((mType === 'peer:joined' || mType === 'peer:left') && Array.isArray(msg.peers)) {
             setPeers(msg.peers as ExternalRoomPeer[]);
+            return;
+          }
+
+          if (mType === 'chat:message' && msg.message) {
+            const chatMsg = msg.message as ChatMessage;
+            setChatMessages((prev) => {
+              if (prev.some((m) => m.id === chatMsg.id)) return prev;
+              return [...prev.slice(-60), chatMsg];
+            });
+            return;
+          }
+
+          if (mType === 'reaction:event' && msg.reaction) {
+            const rx = msg.reaction as ReactionEvent;
+            setReactions((prev) => [...prev.slice(-25), rx]);
+            setTimeout(() => {
+              setReactions((prev) => prev.filter((r) => r.id !== rx.id));
+            }, 4000);
+            return;
           }
         } catch {
           // ignore malformed ws message
@@ -784,10 +895,15 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       syncedMedia,
       syncedPlayback,
       peers,
+      chatMessages,
+      reactions,
       connectExternalRoom,
+      createRoom,
       disconnectExternalRoom,
       syncMediaToExternalRoom,
       syncPlaybackToExternalRoom,
+      sendChatMessage,
+      sendReaction,
       getLiveRoomPositionSec,
       subscribeRemotePlayback,
       returnToExternalRoomApp,
@@ -799,10 +915,15 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       syncedMedia,
       syncedPlayback,
       peers,
+      chatMessages,
+      reactions,
       connectExternalRoom,
+      createRoom,
       disconnectExternalRoom,
       syncMediaToExternalRoom,
       syncPlaybackToExternalRoom,
+      sendChatMessage,
+      sendReaction,
       getLiveRoomPositionSec,
       subscribeRemotePlayback,
       returnToExternalRoomApp,

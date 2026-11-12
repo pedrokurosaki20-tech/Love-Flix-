@@ -227,6 +227,7 @@ export type PageRouteId =
   | 'animes'
   | 'doramas'
   | 'documentaries'
+  | 'sessao-flix'
   | 'search'
   | 'my-flix'
   | 'my-account'

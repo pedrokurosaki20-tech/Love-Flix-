@@ -19,6 +19,7 @@ export const Header: React.FC = () => {
       { id: 'animes', label: 'Animes' },
       { id: 'doramas', label: 'Doramas' },
       { id: 'documentaries', label: 'Documentários' },
+      { id: 'sessao-flix', label: 'Sessão Flix' },
     ],
     []
   );

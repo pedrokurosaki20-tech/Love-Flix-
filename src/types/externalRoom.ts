@@ -57,6 +57,22 @@ export interface ExternalRoomPeer {
   lastSeenMs: number;
 }
 
+export interface ChatMessage {
+  id: string;
+  peerId: string;
+  name: string;
+  text: string;
+  createdAtMs: number;
+}
+
+export interface ReactionEvent {
+  id: string;
+  peerId: string;
+  name: string;
+  emoji: string;
+  createdAtMs: number;
+}
+
 export interface ExternalRoomSnapshot {
   roomId: string;
   seq: number;
@@ -66,6 +82,7 @@ export interface ExternalRoomSnapshot {
   media: ExternalRoomMedia | null;
   playback: ExternalRoomPlayback;
   peers: ExternalRoomPeer[];
+  chatMessages?: ChatMessage[];
 }
 
 export interface ExternalRoomConnectOptions {

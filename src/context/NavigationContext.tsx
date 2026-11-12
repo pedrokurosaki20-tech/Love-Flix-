@@ -64,6 +64,7 @@ const PAGE_TO_PATH: Record<PageRouteId, string> = {
   animes: '/animes',
   doramas: '/doramas',
   documentaries: '/documentarios',
+  'sessao-flix': '/sessao-flix',
   search: '/pesquisa',
   'my-flix': '/minha-flix',
   'my-account': '/minha-conta',
@@ -83,6 +84,18 @@ const PATH_TO_PAGE: Record<string, PageRouteId> = Object.entries(PAGE_TO_PATH).r
 function parseLocationToRoute(): RouteState {
   const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
   const searchParams = new URLSearchParams(window.location.search);
+
+  if (
+    pathname === '/sessao-flix' ||
+    pathname === '/sessao' ||
+    pathname === '/sala' ||
+    pathname === '/watch-party'
+  ) {
+    return {
+      page: 'sessao-flix',
+      query: searchParams.get('sala') || searchParams.get('room') || undefined,
+    };
+  }
 
   const detailMatch = pathname.match(/^\/detalhes\/(movie|tv)\/(\d+)$/);
   if (detailMatch) {

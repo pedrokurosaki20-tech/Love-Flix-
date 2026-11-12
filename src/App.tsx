@@ -22,6 +22,7 @@ import { SeriesPage } from './pages/SeriesPage';
 import { AnimesPage } from './pages/AnimesPage';
 import { DoramasPage } from './pages/DoramasPage';
 import { DocumentariesPage } from './pages/DocumentariesPage';
+import { SessaoFlixPage } from './pages/SessaoFlixPage';
 import { SearchPage } from './pages/SearchPage';
 import { MyFlixPage } from './pages/MyFlixPage';
 import {
@@ -82,6 +83,8 @@ const AppWorkspace: React.FC = () => {
         return <DoramasPage />;
       case 'documentaries':
         return <DocumentariesPage />;
+      case 'sessao-flix':
+        return <SessaoFlixPage />;
       case 'search':
         return <SearchPage />;
       case 'my-flix':

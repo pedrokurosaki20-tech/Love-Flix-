@@ -65,6 +65,14 @@ export interface BridgePeerInfo {
   lastSeenMs: number;
 }
 
+export interface BridgeChatMessage {
+  id: string;
+  peerId: string;
+  name: string;
+  text: string;
+  createdAtMs: number;
+}
+
 export interface BridgeRoomRecord {
   roomId: string;
   media: BridgeMediaState | null;
@@ -72,6 +80,7 @@ export interface BridgeRoomRecord {
   webhookUrl: string | null;
   externalAppUrl: string | null;
   peers: Map<string, BridgePeerInfo>;
+  chatMessages: BridgeChatMessage[];
   seenEventIds: Set<string>;
   seq: number;
   createdAtMs: number;
@@ -305,6 +314,7 @@ export function getOrCreateBridgeRoom(roomId: string): BridgeRoomRecord {
       webhookUrl: null,
       externalAppUrl: null,
       peers: new Map(),
+      chatMessages: [],
       seenEventIds: new Set(),
       seq: 0,
       createdAtMs: now,
@@ -340,7 +350,27 @@ export function serializeBridgeRoom(room: BridgeRoomRecord) {
       updatedAtMs: now,
     },
     peers: Array.from(room.peers.values()),
+    chatMessages: (room.chatMessages || []).slice(-50),
   };
+}
+
+export function addChatMessageToBridgeRoom(
+  room: BridgeRoomRecord,
+  msg: { peerId: string; name: string; text: string }
+): BridgeChatMessage {
+  if (!room.chatMessages) room.chatMessages = [];
+  const chatMsg: BridgeChatMessage = {
+    id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    peerId: msg.peerId,
+    name: msg.name,
+    text: msg.text.slice(0, 500),
+    createdAtMs: Date.now(),
+  };
+  room.chatMessages.push(chatMsg);
+  if (room.chatMessages.length > 80) {
+    room.chatMessages.shift();
+  }
+  return chatMsg;
 }
 
 function recordSeenEventId(room: BridgeRoomRecord, eventId: string): boolean {
