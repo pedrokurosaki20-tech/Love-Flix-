@@ -19,6 +19,7 @@ export const AuthCard: React.FC<AuthCardProps> = ({
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Login form state
   const [loginIdentifier, setLoginIdentifier] = useState('');
@@ -33,21 +34,27 @@ export const AuthCard: React.FC<AuthCardProps> = ({
   const [regConfirmPassword, setRegConfirmPassword] = useState('');
   const [showRegPassword, setShowRegPassword] = useState(false);
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setSuccessMsg('');
-
-    const res = login(loginIdentifier, loginPassword);
-    if (!res.success) {
-      setErrorMsg(res.message || 'Erro ao realizar login.');
-    } else {
-      setSuccessMsg('Login realizado com sucesso!');
-      if (onSuccess) onSuccess();
+    setIsSubmitting(true);
+    try {
+      const res = await login(loginIdentifier, loginPassword);
+      if (!res.success) {
+        setErrorMsg(res.message || 'Erro ao realizar login.');
+      } else {
+        setSuccessMsg(res.message || 'Login realizado com sucesso!');
+        if (res.authenticated !== false && onSuccess) onSuccess();
+      }
+    } catch {
+      setErrorMsg('Não foi possível entrar agora. Tente novamente.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setSuccessMsg('');
@@ -57,18 +64,24 @@ export const AuthCard: React.FC<AuthCardProps> = ({
       return;
     }
 
-    const res = register({
-      name: regName,
-      email: regEmail,
-      phone: regPhone,
-      password: regPassword,
-    });
-
-    if (!res.success) {
-      setErrorMsg(res.message || 'Erro ao criar conta.');
-    } else {
-      setSuccessMsg('Conta criada com sucesso!');
-      if (onSuccess) onSuccess();
+    setIsSubmitting(true);
+    try {
+      const res = await register({
+        name: regName,
+        email: regEmail,
+        phone: regPhone,
+        password: regPassword,
+      });
+      if (!res.success) {
+        setErrorMsg(res.message || 'Erro ao criar conta.');
+      } else {
+        setSuccessMsg(res.message || 'Conta criada com sucesso!');
+        if (res.authenticated !== false && onSuccess) onSuccess();
+      }
+    } catch {
+      setErrorMsg('Não foi possível criar a conta agora. Tente novamente.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -142,7 +155,7 @@ export const AuthCard: React.FC<AuthCardProps> = ({
         {mode === 'login' && (
           <form onSubmit={handleLoginSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <label className="block text-xs font-medium text-white/90">E-mail ou Celular</label>
+              <label className="block text-xs font-medium text-white/90">E-mail ou celular verificado</label>
               <div className="relative flex items-center">
                 <Mail className="absolute left-3.5 w-4 h-4 text-[#777777] pointer-events-none" />
                 <input
@@ -150,7 +163,7 @@ export const AuthCard: React.FC<AuthCardProps> = ({
                   required
                   value={loginIdentifier}
                   onChange={(e) => setLoginIdentifier(e.target.value)}
-                  placeholder="seu.email@exemplo.com ou (11) 98765-4321"
+                  placeholder="seu.email@exemplo.com ou +5511999999999"
                   className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#1c1c1c] border border-white/12 text-sm text-white placeholder:text-[#666666] focus:outline-none focus:border-[#E50914] focus:ring-1 focus:ring-[#E50914] transition-all"
                 />
               </div>
@@ -182,9 +195,10 @@ export const AuthCard: React.FC<AuthCardProps> = ({
 
             <button
               type="submit"
+              disabled={isSubmitting}
               className="w-full py-3 rounded-xl bg-[#E50914] hover:bg-[#d00812] text-white font-bold text-sm tracking-wide transition-all shadow-lg shadow-[#E50914]/20 active:scale-[0.99] cursor-pointer flex items-center justify-center gap-2"
             >
-              <span>Entrar na conta</span>
+              <span>{isSubmitting ? 'Entrando...' : 'Entrar na conta'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
@@ -281,9 +295,10 @@ export const AuthCard: React.FC<AuthCardProps> = ({
 
             <button
               type="submit"
+              disabled={isSubmitting}
               className="w-full py-3 rounded-xl bg-[#E50914] hover:bg-[#d00812] text-white font-bold text-sm tracking-wide transition-all shadow-lg shadow-[#E50914]/20 active:scale-[0.99] cursor-pointer flex items-center justify-center gap-2"
             >
-              <span>Concluir cadastro</span>
+              <span>{isSubmitting ? 'Criando conta...' : 'Concluir cadastro'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>

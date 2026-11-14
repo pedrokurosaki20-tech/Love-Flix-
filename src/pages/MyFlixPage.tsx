@@ -62,6 +62,8 @@ type FullScreenTab =
   | 'edit-profile'
   | 'account';
 
+type ContactKind = 'email' | 'phone';
+
 interface SelectSheetOption {
   value: string;
   label: string;
@@ -102,7 +104,8 @@ export const MyFlixPage: React.FC = () => {
     unselectProfile,
     logout,
     changePassword,
-    updateAccountDetails,
+    requestContactChange,
+    verifyContactChange,
     pushToast,
     isDnsFlowPendingReturn,
     setIsDnsFlowPendingReturn,
@@ -131,8 +134,15 @@ export const MyFlixPage: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Account form state (opção própria para e-mail, senha, celular e pagamento)
-  const [accountEmail, setAccountEmail] = useState(profile.email || 'contato@loveflix.app');
-  const [accountPhone, setAccountPhone] = useState(profile.phone || '+55 (11) 98765-4321');
+  const [accountEmail, setAccountEmail] = useState(currentAccount?.email || '');
+  const [accountPhone, setAccountPhone] = useState(currentAccount?.phone || '');
+  const [editingContact, setEditingContact] = useState<ContactKind | null>(null);
+  const [contactStep, setContactStep] = useState<'edit' | 'code'>('edit');
+  const [contactDraft, setContactDraft] = useState('');
+  const [contactCode, setContactCode] = useState('');
+  const [contactError, setContactError] = useState('');
+  const [contactMessage, setContactMessage] = useState('');
+  const [contactBusy, setContactBusy] = useState(false);
   const [accountPassword, setAccountPassword] = useState(profile.maskedPassword || '••••••••••••');
   const [isEditingPassword, setIsEditingPassword] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState('');
@@ -144,12 +154,18 @@ export const MyFlixPage: React.FC = () => {
 
   // Sync state with current profile/account
   useEffect(() => {
-    if (profile.email) setAccountEmail(profile.email);
-    if (profile.phone) setAccountPhone(profile.phone);
+    if (currentAccount?.email) setAccountEmail(currentAccount.email);
+    if (currentAccount?.phone) setAccountPhone(currentAccount.phone);
     if (profile.name) setEditName(profile.name);
     if (profile.avatarSrc) setAvatarPreview(profile.avatarSrc);
     if (profile.maskedPassword) setAccountPassword(profile.maskedPassword);
-  }, [profile.email, profile.phone, profile.name, profile.avatarSrc, profile.maskedPassword]);
+  }, [
+    currentAccount?.email,
+    currentAccount?.phone,
+    profile.name,
+    profile.avatarSrc,
+    profile.maskedPassword,
+  ]);
 
   // Custom modal/sheet state for platform-styled select options
   const [activeSelectConfig, setActiveSelectConfig] = useState<SelectSheetConfig | null>(null);
@@ -273,17 +289,60 @@ export const MyFlixPage: React.FC = () => {
     }
   };
 
-  const handleSaveAccount = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    updateAccountDetails({
-      email: accountEmail.trim(),
-      phone: accountPhone.trim(),
-    });
-    setAccountSavedToast(true);
-    setTimeout(() => setAccountSavedToast(false), 4000);
+  const openContactChange = (kind: ContactKind) => {
+    setEditingContact((current) => (current === kind ? null : kind));
+    setContactStep('edit');
+    setContactDraft(kind === 'email' ? accountEmail : accountPhone);
+    setContactCode('');
+    setContactError('');
+    setContactMessage('');
   };
 
-  const handleSavePassword = () => {
+  const handleRequestContactCode = async (kind: ContactKind) => {
+    setContactError('');
+    const rawTarget = contactDraft.trim();
+    const target =
+      kind === 'phone'
+        ? rawTarget.startsWith('+')
+          ? `+${rawTarget.replace(/\D/g, '')}`
+          : `+55${rawTarget.replace(/\D/g, '')}`
+        : rawTarget.toLowerCase();
+    if (kind === 'phone' && !/^\+[1-9]\d{7,14}$/.test(target)) {
+      setContactError('Informe um número válido com código do país, por exemplo +5511999999999.');
+      return;
+    }
+
+    setContactBusy(true);
+    const result = await requestContactChange(kind, target);
+    setContactBusy(false);
+    if (!result.success) {
+      setContactError(result.message || 'Não foi possível enviar o código.');
+      return;
+    }
+    setContactDraft(target);
+    setContactStep('code');
+    setContactMessage(result.message || 'Código enviado.');
+  };
+
+  const handleVerifyContactCode = async (kind: ContactKind) => {
+    setContactError('');
+    setContactBusy(true);
+    const result = await verifyContactChange(kind, contactDraft, contactCode.trim());
+    setContactBusy(false);
+    if (!result.success) {
+      setContactError(result.message || 'Não foi possível confirmar o código.');
+      return;
+    }
+    if (kind === 'email') setAccountEmail(contactDraft);
+    else setAccountPhone(contactDraft);
+    setEditingContact(null);
+    setContactCode('');
+    setAccountSavedToast(true);
+    setTimeout(() => setAccountSavedToast(false), 4000);
+    pushToast(result.message || 'Dado de contato atualizado.', 'accent');
+  };
+
+  const handleSavePassword = async () => {
     setPasswordChangeError('');
     if (!currentPasswordInput) {
       setPasswordChangeError('Informe a sua senha atual de acesso.');
@@ -297,7 +356,7 @@ export const MyFlixPage: React.FC = () => {
       setPasswordChangeError('As novas senhas digitadas não coincidem.');
       return;
     }
-    const res = changePassword(currentPasswordInput, newPassword);
+    const res = await changePassword(currentPasswordInput, newPassword);
     if (!res.success) {
       setPasswordChangeError(res.message || 'Senha atual incorreta.');
     } else {
@@ -310,6 +369,96 @@ export const MyFlixPage: React.FC = () => {
       setAccountSavedToast(true);
       setTimeout(() => setAccountSavedToast(false), 4000);
     }
+  };
+
+  const renderContactEditor = (kind: ContactKind) => {
+    if (editingContact !== kind) return null;
+    const label = kind === 'email' ? 'e-mail' : 'número';
+    const inputType = kind === 'email' ? 'email' : 'tel';
+
+    return (
+      <div className="space-y-3 border-t border-white/[0.06] bg-black/40 p-4 sm:p-5 animate-fade-in">
+        <p className="text-xs font-semibold text-white">
+          {contactStep === 'edit' ? `Digite o novo ${label}` : 'Confirme o código de segurança'}
+        </p>
+        {contactError && (
+          <div className="rounded-xl border border-red-500/30 bg-red-500/15 p-2.5 text-center text-xs font-medium text-[#FF4757]">
+            {contactError}
+          </div>
+        )}
+        {contactStep === 'edit' ? (
+          <input
+            type={inputType}
+            autoComplete="off"
+            value={contactDraft}
+            onChange={(event) => setContactDraft(event.target.value)}
+            placeholder={kind === 'email' ? 'seu.email@exemplo.com' : '+5511999999999'}
+            className="w-full rounded-xl border border-white/12 bg-[#1c1c1c] px-3.5 py-2.5 text-sm text-white placeholder:text-white/35 focus:border-[#E50914] focus:outline-none"
+          />
+        ) : (
+          <>
+            <p className="text-xs text-white/60">{contactMessage}</p>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={contactCode}
+              onChange={(event) =>
+                setContactCode(event.target.value.replace(/\D/g, '').slice(0, 6))
+              }
+              placeholder="Código de 6 dígitos"
+              className="w-full rounded-xl border border-white/12 bg-[#1c1c1c] px-3.5 py-2.5 font-mono text-sm tracking-[0.3em] text-white placeholder:text-white/35 focus:border-[#E50914] focus:outline-none"
+            />
+          </>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setEditingContact(null);
+              setContactError('');
+              setContactCode('');
+            }}
+            className="rounded-lg px-3 py-2 text-xs font-semibold text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white"
+          >
+            Cancelar
+          </button>
+          {contactStep === 'code' && (
+            <button
+              type="button"
+              onClick={() => {
+                setContactStep('edit');
+                setContactCode('');
+                setContactError('');
+              }}
+              className="rounded-lg px-3 py-2 text-xs font-semibold text-white/70 transition-colors hover:text-white"
+            >
+              Alterar dado
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={
+              contactBusy ||
+              (contactStep === 'edit' ? !contactDraft.trim() : contactCode.length !== 6)
+            }
+            onClick={() =>
+              contactStep === 'edit'
+                ? void handleRequestContactCode(kind)
+                : void handleVerifyContactCode(kind)
+            }
+            className="rounded-lg bg-[#E50914] px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-[#FF253A] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {contactBusy
+              ? 'Aguarde...'
+              : contactStep === 'edit'
+                ? 'Enviar código'
+                : 'Confirmar código'}
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const openTab = (tab: FullScreenTab) => {
@@ -560,8 +709,9 @@ export const MyFlixPage: React.FC = () => {
           <button
             type="button"
             onClick={() => {
-              setAccountEmail(profile.email || 'contato@loveflix.app');
-              setAccountPhone(profile.phone || '+55 (11) 98765-4321');
+              setAccountEmail(currentAccount?.email || '');
+              setAccountPhone(currentAccount?.phone || '');
+              setEditingContact(null);
               openTab('account');
             }}
             className="w-full flex items-center justify-between py-3.5 px-1 hover:px-2 rounded-xl hover:bg-white/[0.04] transition-all cursor-pointer group text-left"
@@ -1489,21 +1639,25 @@ export const MyFlixPage: React.FC = () => {
             </h3>
             <div className="rounded-2xl bg-[#141414] border border-white/[0.08] divide-y divide-white/[0.06] overflow-hidden shadow-lg">
               {/* E-mail cadastrado */}
-              <div className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
                 <div className="flex items-center gap-2">
                   <Mail className="w-4 h-4 text-white/70 shrink-0" />
                   <p className="text-sm font-semibold text-white">E-mail cadastrado</p>
                 </div>
-                <div className="sm:max-w-xs w-full sm:w-auto">
-                  <input
-                    type="email"
-                    value={accountEmail}
-                    onChange={(e) => setAccountEmail(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#1c1c1c] border border-white/12 text-xs sm:text-sm text-white focus:outline-none focus:border-white/40"
-                    placeholder="seu.email@exemplo.com"
-                  />
+                <div className="flex min-w-0 items-center justify-between gap-3 sm:justify-end">
+                  <span className="min-w-0 truncate text-xs text-white/70 sm:text-sm">
+                    {currentAccount?.email || 'E-mail não cadastrado'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openContactChange('email')}
+                    className="shrink-0 rounded-lg bg-white/[0.08] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/[0.14]"
+                  >
+                    {editingContact === 'email' ? 'Fechar' : 'Trocar'}
+                  </button>
                 </div>
               </div>
+              {renderContactEditor('email')}
 
               {/* Senha de Acesso */}
               <div className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1538,7 +1692,7 @@ export const MyFlixPage: React.FC = () => {
 
                   <div className="space-y-2.5">
                     <div>
-                      <label className="block text-[11px] text-[#A1A1A1] mb-1">Senha atual (padrão: 123456)</label>
+                      <label className="block text-[11px] text-[#A1A1A1] mb-1">Senha atual</label>
                       <input
                         type={showPassword ? 'text' : 'password'}
                         value={currentPasswordInput}
@@ -1594,21 +1748,25 @@ export const MyFlixPage: React.FC = () => {
               )}
 
               {/* Número de Celular */}
-              <div className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
                 <div className="flex items-center gap-2">
                   <Phone className="w-4 h-4 text-white/70 shrink-0" />
                   <p className="text-sm font-semibold text-white">Número de celular</p>
                 </div>
-                <div className="sm:max-w-xs w-full sm:w-auto">
-                  <input
-                    type="tel"
-                    value={accountPhone}
-                    onChange={(e) => setAccountPhone(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#1c1c1c] border border-white/12 text-xs sm:text-sm text-white focus:outline-none focus:border-white/40 font-mono"
-                    placeholder="+55 (11) 98765-4321"
-                  />
+                <div className="flex min-w-0 items-center justify-between gap-3 sm:justify-end">
+                  <span className="min-w-0 truncate font-mono text-xs text-white/70 sm:text-sm">
+                    {currentAccount?.phone || 'Celular não cadastrado'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openContactChange('phone')}
+                    className="shrink-0 rounded-lg bg-white/[0.08] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/[0.14]"
+                  >
+                    {editingContact === 'phone' ? 'Fechar' : 'Trocar'}
+                  </button>
                 </div>
               </div>
+              {renderContactEditor('phone')}
             </div>
           </div>
 
@@ -1651,7 +1809,6 @@ export const MyFlixPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Botão de Salvar Alterações da Conta */}
           <div className="flex items-center justify-end gap-3 pt-2">
             <button
               type="button"
@@ -1659,13 +1816,6 @@ export const MyFlixPage: React.FC = () => {
               className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white cursor-pointer transition-colors"
             >
               Voltar
-            </button>
-            <button
-              type="button"
-              onClick={handleSaveAccount}
-              className="px-6 py-2.5 rounded-xl bg-white hover:bg-white/90 text-black text-xs font-bold shadow-md cursor-pointer transition-all active:scale-[0.98]"
-            >
-              Salvar dados da conta
             </button>
           </div>
         </div>

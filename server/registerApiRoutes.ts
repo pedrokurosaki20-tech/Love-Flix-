@@ -23,6 +23,7 @@ import {
   isMovieCinemaOnly,
   isMovieExcludedFromPlatform,
 } from './cinemaFilter.js';
+import { registerAccountSecurityRoutes } from './accountSecurity.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -75,6 +76,7 @@ export function registerApiRoutes(app: Express): void {
       req.url.startsWith('/tmdb/') ||
       req.url.startsWith('/supercdn/') ||
       req.url.startsWith('/bridge/') ||
+      req.url.startsWith('/account/contact-verification/') ||
       req.url === '/health' ||
       req.url.startsWith('/health?')
     ) {
@@ -84,6 +86,7 @@ export function registerApiRoutes(app: Express): void {
   });
 
   registerExternalBridgeRoutes(app);
+  registerAccountSecurityRoutes(app);
 
   app.get('/api/health', (_req: Request, res: Response) => {
     const apiKey = process.env.TMDB_API_KEY || FALLBACK_SERVER_KEY;

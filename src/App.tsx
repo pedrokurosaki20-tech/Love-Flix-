@@ -33,8 +33,18 @@ import {
 
 const AppWorkspace: React.FC = () => {
   const { route } = useNavigation();
-  const { isLoggedIn, isProfileSelected } = useUserData();
+  const { isLoggedIn, isAuthReady, isProfileSelected } = useUserData();
   const { isConnected, isPickerMode } = useExternalRoom();
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-[#080808] text-white flex items-center justify-center">
+        <div className="font-display text-xl font-extrabold tracking-tight">
+          <span className="text-[#E50914]">LOVE</span> FLIX
+        </div>
+      </div>
+    );
+  }
 
   // 1. Caso o usuário não esteja logado, exige login ou cadastro para entrar
   if (!isLoggedIn) {

@@ -1,7 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { STUDIO_AVATARS, type MediaType, type TMDBMediaItem } from '../types/tmdb';
 import { resolveMediaType } from '../services/tmdb';
 import { LOVEFLIX_PRESET_AVATARS } from '../utils/avatars';
+import { supabase } from '../services/supabase';
 
 export interface SavedMediaEntry {
   id: number;
@@ -86,7 +88,6 @@ export interface UserAccount {
   id: string;
   name: string;
   email: string;
-  password: string;
   phone: string;
   avatarSrc: string;
   createdAt: string;
@@ -124,19 +125,30 @@ interface UserDataContextValue {
 
   // Autenticação & Sincronização de Conta
   isLoggedIn: boolean;
+  isAuthReady: boolean;
   currentAccount: UserAccount | null;
-  registeredAccounts: UserAccount[];
-  login: (emailOrPhone: string, pass: string) => { success: boolean; message?: string };
+  login: (
+    emailOrPhone: string,
+    pass: string
+  ) => Promise<{ success: boolean; message?: string; authenticated?: boolean }>;
   register: (data: {
     name: string;
     email: string;
     password: string;
     phone: string;
     avatarSrc?: string;
-  }) => { success: boolean; message?: string };
-  logout: () => void;
-  changePassword: (oldPass: string, newPass: string) => { success: boolean; message?: string };
-  updateAccountDetails: (data: { email?: string; phone?: string; name?: string }) => { success: boolean; message?: string };
+  }) => Promise<{ success: boolean; message?: string; authenticated?: boolean }>;
+  logout: () => Promise<void>;
+  changePassword: (oldPass: string, newPass: string) => Promise<{ success: boolean; message?: string }>;
+  requestContactChange: (
+    kind: 'email' | 'phone',
+    target: string
+  ) => Promise<{ success: boolean; message?: string }>;
+  verifyContactChange: (
+    kind: 'email' | 'phone',
+    target: string,
+    code: string
+  ) => Promise<{ success: boolean; message?: string }>;
   isAuthModalOpen: boolean;
   authModalInitialMode: 'login' | 'register';
   openAuthModal: (mode?: 'login' | 'register') => void;
@@ -191,20 +203,6 @@ interface UserDataContextValue {
 const STORAGE_KEY = 'loveflix_storage_v1';
 const ACCOUNTS_STORAGE_KEY = 'loveflix_registered_accounts_v1';
 const AUTH_SESSION_KEY = 'loveflix_auth_session_v1';
-
-const DEFAULT_ACCOUNTS: UserAccount[] = [
-  {
-    id: 'user_pedro',
-    name: 'Pedro',
-    email: 'contato@loveflix.app',
-    password: '123456',
-    phone: '+55 (11) 98765-4321',
-    avatarSrc: LOVEFLIX_PRESET_AVATARS[0].src,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    subscriptionPlan: 'Love Flix Premium • 4K Ultra HD',
-    paymentMethod: 'Cartão de Crédito final •••• 4242',
-  },
-];
 
 const DEFAULT_PROFILES: Record<string, ProfileDataBucket> = {
   prof_pedro_principal: {
@@ -294,47 +292,10 @@ function loadInitialState(): StoredRootState {
   };
 }
 
-function loadRegisteredAccounts(): UserAccount[] {
-  try {
-    const raw = localStorage.getItem(ACCOUNTS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {
-    // fallback
-  }
-  return DEFAULT_ACCOUNTS;
-}
-
 interface AuthSessionState {
   isLoggedIn: boolean;
   activeAccountId: string;
   activeProfileId: string | null;
-}
-
-function loadInitialAuthSession(accs: UserAccount[]): AuthSessionState {
-  try {
-    const raw = localStorage.getItem(AUTH_SESSION_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed?.isLoggedIn === 'boolean') {
-        const found = accs.find((a) => a.id === parsed.activeAccountId);
-        return {
-          isLoggedIn: parsed.isLoggedIn,
-          activeAccountId: found ? found.id : accs[0]?.id || 'user_pedro',
-          activeProfileId: parsed.activeProfileId || null,
-        };
-      }
-    }
-  } catch {
-    // fallback
-  }
-  return {
-    isLoggedIn: false,
-    activeAccountId: accs[0]?.id || 'user_pedro',
-    activeProfileId: null,
-  };
 }
 
 const UserDataContext = createContext<UserDataContextValue | null>(null);
@@ -344,9 +305,14 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isProfileSwitcherOpen, setProfileSwitcherOpen] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Estado de Contas Registradas e Sessão
-  const [accounts, setAccounts] = useState<UserAccount[]>(loadRegisteredAccounts);
-  const [authSession, setAuthSession] = useState<AuthSessionState>(() => loadInitialAuthSession(accounts));
+  // Supabase owns credentials and the authenticated session; account secrets never live in localStorage.
+  const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [authSession, setAuthSession] = useState<AuthSessionState>({
+    isLoggedIn: false,
+    activeAccountId: '',
+    activeProfileId: null,
+  });
   const [isAuthModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [authModalInitialMode, setAuthModalInitialMode] = useState<'login' | 'register'>('login');
 
@@ -356,8 +322,24 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isDnsFlowPendingReturn, setIsDnsFlowPendingReturn] = useState<boolean>(false);
 
   const currentAccount = useMemo(() => {
-    return accounts.find((a) => a.id === authSession.activeAccountId) || accounts[0] || null;
-  }, [accounts, authSession.activeAccountId]);
+    if (!authUser) return null;
+    const metadata = authUser.user_metadata || {};
+    return {
+      id: authUser.id,
+      name: typeof metadata.name === 'string' ? metadata.name : 'Love Flix',
+      email: authUser.email || '',
+      phone:
+        authUser.phone ||
+        (typeof metadata.phone === 'string' ? metadata.phone : ''),
+      avatarSrc:
+        typeof metadata.avatarSrc === 'string'
+          ? metadata.avatarSrc
+          : LOVEFLIX_PRESET_AVATARS[0].src,
+      createdAt: authUser.created_at,
+      subscriptionPlan: 'Love Flix Premium • 4K Ultra HD',
+      paymentMethod: 'Cartão de Crédito final •••• 4242',
+    };
+  }, [authUser]);
 
   // Lista dos perfis pertencentes à conta principal ativa (máximo de 4)
   const accountProfiles = useMemo(() => {
@@ -471,6 +453,62 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, 2800);
   }, []);
 
+  useEffect(() => {
+    try {
+      localStorage.removeItem(ACCOUNTS_STORAGE_KEY);
+      localStorage.removeItem(AUTH_SESSION_KEY);
+    } catch (error) {
+      console.error('Unable to clear legacy local account credentials.', error);
+    }
+
+    if (!supabase) {
+      setIsAuthReady(true);
+      return;
+    }
+
+    let active = true;
+    const acceptSession = (user: SupabaseUser | null) => {
+      setAuthUser(user);
+      setAuthSession((previous) => ({
+        isLoggedIn: Boolean(user),
+        activeAccountId: user?.id || '',
+        activeProfileId:
+          user && previous.activeAccountId === user.id ? previous.activeProfileId : null,
+      }));
+    };
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (active) acceptSession(session?.user || null);
+    });
+
+    void supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) {
+          console.error('Unable to restore the Supabase session.', error);
+          pushToast('Não foi possível restaurar sua sessão. Entre novamente.');
+        }
+        acceptSession(data.session?.user || null);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        console.error('Unable to restore the Supabase session.', error);
+        pushToast('Não foi possível restaurar sua sessão. Entre novamente.');
+        acceptSession(null);
+      })
+      .finally(() => {
+        if (active) setIsAuthReady(true);
+      });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, [pushToast]);
+
   const openAuthModal = useCallback((mode: 'login' | 'register' = 'login') => {
     setAuthModalInitialMode(mode);
     setAuthModalOpen(true);
@@ -517,11 +555,6 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         activeProfileId: profileId,
       };
       setAuthSession(newSession);
-      try {
-        localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(newSession));
-      } catch {
-        // quota
-      }
       setState((prev) => ({
         ...prev,
         activeProfileId: profileId,
@@ -541,11 +574,6 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       activeProfileId: null,
     };
     setAuthSession(newSession);
-    try {
-      localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(newSession));
-    } catch {
-      // quota
-    }
     setState((prev) => ({
       ...prev,
       activeProfileId: null,
@@ -686,11 +714,6 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (authSession.activeProfileId === profileId) {
         const newSession = { ...authSession, activeProfileId: null };
         setAuthSession(newSession);
-        try {
-          localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(newSession));
-        } catch {
-          // quota
-        }
       }
 
       pushToast(`Perfil "${deletedName}" foi excluído.`);
@@ -715,53 +738,57 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // =========================================================================
 
   const login = useCallback(
-    (identifier: string, pass: string) => {
+    async (identifier: string, pass: string) => {
       const cleanId = identifier.trim().toLowerCase();
       const cleanPass = pass.trim();
-
       if (!cleanId || !cleanPass) {
         return { success: false, message: 'Preencha o e-mail ou celular e a senha de acesso.' };
       }
-
-      const normalizedInput = normalizePhone(cleanId);
-
-      const account = accounts.find((a) => {
-        const emailMatch = a.email.toLowerCase() === cleanId;
-        const phoneMatch = normalizedInput.length >= 8 && normalizePhone(a.phone) === normalizedInput;
-        return (emailMatch || phoneMatch) && a.password === cleanPass;
-      });
-
-      if (!account) {
-        return { success: false, message: 'E-mail, celular ou senha incorretos. Verifique suas credenciais.' };
+      if (!supabase) {
+        return {
+          success: false,
+          message: 'O acesso seguro ainda não foi configurado neste ambiente.',
+        };
       }
 
-      // Ao realizar login com sucesso: direciona para a tela "Quem está assistindo?" (activeProfileId: null)
-      const newSession: AuthSessionState = {
+      const credentials = cleanId.includes('@')
+        ? { email: cleanId, password: cleanPass }
+        : {
+            phone: cleanId.startsWith('+')
+              ? `+${normalizePhone(cleanId)}`
+              : `+55${normalizePhone(cleanId)}`,
+            password: cleanPass,
+          };
+      const { data, error } = await supabase.auth.signInWithPassword(credentials);
+      if (error || !data.user) {
+        return {
+          success: false,
+          message:
+            error?.message === 'Email not confirmed'
+              ? 'Confirme seu e-mail pelo link enviado antes de entrar.'
+              : 'E-mail, celular ou senha incorretos. Verifique suas credenciais.',
+        };
+      }
+
+      setAuthUser(data.user);
+      setAuthSession({
         isLoggedIn: true,
-        activeAccountId: account.id,
+        activeAccountId: data.user.id,
         activeProfileId: null,
-      };
-      setAuthSession(newSession);
-      try {
-        localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(newSession));
-      } catch {
-        // quota
-      }
-
+      });
       setState((prev) => ({
         ...prev,
         activeProfileId: null,
       }));
-
       setAuthModalOpen(false);
-      pushToast(`Bem-vindo de volta! Selecione quem está assistindo.`, 'accent');
-      return { success: true };
+      pushToast('Bem-vindo de volta! Selecione quem está assistindo.', 'accent');
+      return { success: true, authenticated: true };
     },
-    [accounts, pushToast]
+    [pushToast]
   );
 
   const register = useCallback(
-    (data: {
+    async (data: {
       name: string;
       email: string;
       password: string;
@@ -786,111 +813,70 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!cleanPass || cleanPass.length < 6) {
         return { success: false, message: 'A senha de acesso deve ter no mínimo 6 caracteres.' };
       }
-
-      const emailExists = accounts.some((a) => a.email.toLowerCase() === cleanEmail);
-      if (emailExists) {
-        return { success: false, message: 'Este endereço de e-mail já está cadastrado em outra conta.' };
+      if (!supabase) {
+        return {
+          success: false,
+          message: 'O cadastro seguro ainda não foi configurado neste ambiente.',
+        };
       }
 
-      const phoneExists = accounts.some((a) => normalizePhone(a.phone) === normalizedPhone);
-      if (phoneExists) {
-        return { success: false, message: 'Este número de celular já está cadastrado em outra conta.' };
-      }
-
-      const newAccountId = `user_${Date.now()}`;
-      const defaultAvatar = data.avatarSrc || LOVEFLIX_PRESET_AVATARS[0].src;
-      const newAccount: UserAccount = {
-        id: newAccountId,
-        name: cleanName,
+      const { data: authData, error } = await supabase.auth.signUp({
         email: cleanEmail,
         password: cleanPass,
-        phone: cleanPhone,
-        avatarSrc: defaultAvatar,
-        createdAt: new Date().toISOString(),
-        subscriptionPlan: 'Love Flix Premium • 4K Ultra HD',
-        paymentMethod: 'Cartão de Crédito final •••• 4242',
-      };
-
-      const updatedAccounts = [newAccount, ...accounts];
-      setAccounts(updatedAccounts);
-      try {
-        localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(updatedAccounts));
-      } catch {
-        // quota
+        options: {
+          data: {
+            name: cleanName,
+            phone: cleanPhone,
+            avatarSrc: data.avatarSrc || LOVEFLIX_PRESET_AVATARS[0].src,
+          },
+        },
+      });
+      if (error) {
+        return {
+          success: false,
+          message:
+            error.message.toLowerCase().includes('already registered') ||
+            error.message.toLowerCase().includes('already been registered')
+              ? 'Este endereço de e-mail já está cadastrado em outra conta.'
+              : 'Não foi possível criar a conta. Confira os dados e tente novamente.',
+        };
       }
 
-      // Cria automaticamente o 1º perfil principal vinculado à nova conta
-      const initialProfileId = `prof_${newAccountId}_primary`;
-      const initialBucket: ProfileDataBucket = {
-        profile: {
-          id: initialProfileId,
-          accountId: newAccountId,
-          name: cleanName,
-          avatarSrc: defaultAvatar,
-          isPrimary: true,
-          favoriteGenreIds: [28, 878, 53, 18],
-          preferredLanguage: 'pt-BR',
-          autoplayHero: true,
-          compactCards: false,
-          accentPreset: 'classic',
-          phone: cleanPhone,
-          email: cleanEmail,
-          paymentMethod: newAccount.paymentMethod,
-          subscriptionPlan: newAccount.subscriptionPlan,
-        },
-        myList: [],
-        favorites: [],
-        watchLater: [],
-        watched: [],
-        history: [],
-        recentSearches: [],
-      };
-
-      // Sessão iniciada direcionando para a tela de seleção de perfil
-      const newSession: AuthSessionState = {
-        isLoggedIn: true,
-        activeAccountId: newAccountId,
-        activeProfileId: null,
-      };
-      setAuthSession(newSession);
-      try {
-        localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(newSession));
-      } catch {
-        // quota
+      if (authData.session && authData.user) {
+        setAuthUser(authData.user);
+        setAuthSession({
+          isLoggedIn: true,
+          activeAccountId: authData.user.id,
+          activeProfileId: null,
+        });
+        setState((prev) => ({ ...prev, activeProfileId: null }));
       }
 
-      setState((prev) => ({
-        ...prev,
-        activeProfileId: null,
-        profiles: {
-          ...prev.profiles,
-          [initialProfileId]: initialBucket,
-        },
-      }));
-
-      setAuthModalOpen(false);
-      pushToast(`Conta criada com sucesso! Bem-vindo(a), ${cleanName}!`, 'accent');
-
-      // Dispara o aviso orientativo de DNS após o cadastro
-      setShowDnsWelcomePrompt(true);
-
-      return { success: true };
+      if (authData.session) {
+        setAuthModalOpen(false);
+        pushToast(`Conta criada com sucesso! Bem-vindo(a), ${cleanName}!`, 'accent');
+        setShowDnsWelcomePrompt(true);
+        return { success: true, message: 'Conta criada com sucesso.', authenticated: true };
+      }
+      return {
+        success: true,
+        message: 'Enviamos um link de confirmação para seu e-mail. Confirme-o para entrar.',
+        authenticated: false,
+      };
     },
-    [accounts, pushToast]
+    [pushToast]
   );
 
-  const logout = useCallback(() => {
-    const newSession: AuthSessionState = {
-      isLoggedIn: false,
-      activeAccountId: '',
-      activeProfileId: null,
-    };
-    setAuthSession(newSession);
-    try {
-      localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(newSession));
-    } catch {
-      // quota
+  const logout = useCallback(async () => {
+    if (supabase) {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        pushToast('Não foi possível encerrar a sessão. Tente novamente.');
+        return;
+      }
     }
+    setAuthUser(null);
+    setAuthSession({ isLoggedIn: false, activeAccountId: '', activeProfileId: null });
     setState((prev) => ({
       ...prev,
       activeProfileId: null,
@@ -899,64 +885,136 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [pushToast]);
 
   const changePassword = useCallback(
-    (oldPass: string, newPass: string) => {
-      const cur = accounts.find((a) => a.id === authSession.activeAccountId) || accounts[0];
-      if (!cur) {
-        return { success: false, message: 'Nenhuma conta ativa encontrada.' };
-      }
-      if (cur.password !== oldPass.trim()) {
-        return { success: false, message: 'A senha atual informada está incorreta.' };
+    async (oldPass: string, newPass: string) => {
+      if (!supabase || !authUser?.email) {
+        return { success: false, message: 'Nenhuma conta autenticada encontrada.' };
       }
       if (newPass.trim().length < 6) {
         return { success: false, message: 'A nova senha deve ter no mínimo 6 caracteres.' };
       }
-
-      const updatedAccounts = accounts.map((a) =>
-        a.id === cur.id ? { ...a, password: newPass.trim() } : a
-      );
-      setAccounts(updatedAccounts);
-      try {
-        localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(updatedAccounts));
-      } catch {
-        // quota
+      const { error: reauthError } = await supabase.auth.signInWithPassword({
+        email: authUser.email,
+        password: oldPass.trim(),
+      });
+      if (reauthError) {
+        return { success: false, message: 'A senha atual informada está incorreta.' };
+      }
+      const { error } = await supabase.auth.updateUser({ password: newPass.trim() });
+      if (error) {
+        return { success: false, message: 'Não foi possível atualizar a senha agora.' };
       }
 
       pushToast('Senha alterada com sucesso!', 'accent');
       return { success: true, message: 'Senha alterada com sucesso!' };
     },
-    [accounts, authSession.activeAccountId, pushToast]
+    [authUser?.email, pushToast]
   );
 
-  const updateAccountDetails = useCallback(
-    (data: { email?: string; phone?: string; name?: string }) => {
-      const cur = accounts.find((a) => a.id === authSession.activeAccountId) || accounts[0];
-      if (!cur) {
-        return { success: false, message: 'Nenhuma conta ativa encontrada.' };
+  const requestContactChange = useCallback(
+    async (kind: 'email' | 'phone', target: string) => {
+      if (!supabase) {
+        return { success: false, message: 'A verificação de contato não está configurada.' };
+      }
+      const { data, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !data.session) {
+        return { success: false, message: 'Sua sessão expirou. Entre novamente na conta.' };
       }
 
-      if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) {
-        return { success: false, message: 'E-mail inválido.' };
-      }
-
-      const updatedAccount: UserAccount = {
-        ...cur,
-        name: data.name !== undefined ? data.name.trim() : cur.name,
-        email: data.email !== undefined ? data.email.trim().toLowerCase() : cur.email,
-        phone: data.phone !== undefined ? data.phone.trim() : cur.phone,
-      };
-
-      const updatedAccounts = accounts.map((a) => (a.id === cur.id ? updatedAccount : a));
-      setAccounts(updatedAccounts);
       try {
-        localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(updatedAccounts));
+        const response = await fetch('/api/account/contact-verification/request', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${data.session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ kind, target }),
+        });
+        const result = (await response.json()) as { ok?: boolean; error?: string; message?: string };
+        if (!response.ok || !result.ok) {
+          return {
+            success: false,
+            message: result.error || 'Não foi possível enviar o código agora.',
+          };
+        }
+        return { success: true, message: result.message };
       } catch {
-        // quota
+        return { success: false, message: 'Falha de conexão ao solicitar o código.' };
+      }
+    },
+    []
+  );
+
+  const verifyContactChange = useCallback(
+    async (kind: 'email' | 'phone', target: string, code: string) => {
+      if (!supabase) {
+        return { success: false, message: 'A verificação de contato não está configurada.' };
+      }
+      const { data, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !data.session) {
+        return { success: false, message: 'Sua sessão expirou. Entre novamente na conta.' };
       }
 
-      pushToast('Dados da conta atualizados');
-      return { success: true };
+      try {
+        const response = await fetch('/api/account/contact-verification/confirm', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${data.session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ kind, target, code }),
+        });
+        const result = (await response.json()) as { ok?: boolean; error?: string; message?: string };
+        if (!response.ok || !result.ok) {
+          return {
+            success: false,
+            message: result.error || 'Não foi possível confirmar o código.',
+          };
+        }
+
+        const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+        if (refreshError) {
+          console.error('Unable to refresh the account after contact change.', refreshError);
+        }
+        if (refreshed.user) {
+          setAuthUser(refreshed.user);
+        } else {
+          setAuthUser((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  email: kind === 'email' ? target : previous.email,
+                  phone: kind === 'phone' ? target : previous.phone,
+                  user_metadata:
+                    kind === 'phone'
+                      ? { ...previous.user_metadata, phone: target }
+                      : previous.user_metadata,
+                }
+              : previous
+          );
+        }
+        setState((previous) => ({
+          ...previous,
+          profiles: Object.fromEntries(
+            Object.entries(previous.profiles).map(([id, bucket]) => [
+              id,
+              bucket.profile.accountId === authSession.activeAccountId
+                ? {
+                    ...bucket,
+                    profile: {
+                      ...bucket.profile,
+                      ...(kind === 'email' ? { email: target } : { phone: target }),
+                    },
+                  }
+                : bucket,
+            ])
+          ),
+        }));
+        return { success: true, message: result.message };
+      } catch {
+        return { success: false, message: 'Falha de conexão ao confirmar o código.' };
+      }
     },
-    [accounts, authSession.activeAccountId, pushToast]
+    [authSession.activeAccountId]
   );
 
   // =========================================================================
@@ -1197,13 +1255,14 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updateProfile,
 
       isLoggedIn: authSession.isLoggedIn,
+      isAuthReady,
       currentAccount,
-      registeredAccounts: accounts,
       login,
       register,
       logout,
       changePassword,
-      updateAccountDetails,
+      requestContactChange,
+      verifyContactChange,
       isAuthModalOpen,
       authModalInitialMode,
       openAuthModal,
@@ -1260,13 +1319,14 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       deleteAccountProfile,
       updateProfile,
       authSession.isLoggedIn,
+      isAuthReady,
       currentAccount,
-      accounts,
       login,
       register,
       logout,
       changePassword,
-      updateAccountDetails,
+      requestContactChange,
+      verifyContactChange,
       isAuthModalOpen,
       authModalInitialMode,
       openAuthModal,
