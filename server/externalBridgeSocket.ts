@@ -226,10 +226,13 @@ export function attachExternalBridgeWebSocketServer(httpServer: HttpServer): voi
             name: meta.name,
             text,
           });
+          room.seq += 1;
+          room.updatedAtMs = chatMsg.createdAtMs;
           broadcastRoomPayload(meta.roomId, {
             type: 'chat:message',
             roomId: meta.roomId,
             message: chatMsg,
+            seq: room.seq,
           });
         }
         return;

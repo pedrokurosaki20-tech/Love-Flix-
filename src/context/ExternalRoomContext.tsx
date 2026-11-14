@@ -222,15 +222,32 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   const ingestRoomSnapshot = useCallback(
     (snapshot: ExternalRoomSnapshot, isInitial: boolean) => {
+      const snapshotSeq = snapshot.seq || 0;
+      if (snapshotSeq < seqRef.current) return;
+
       if (typeof snapshot.serverNowMs === 'number') {
         clockOffsetMsRef.current = Math.round(snapshot.serverNowMs - Date.now());
       }
-      seqRef.current = Math.max(seqRef.current, snapshot.seq || 0);
+      seqRef.current = snapshotSeq;
       if (Array.isArray(snapshot.peers)) {
         setPeers(snapshot.peers);
       }
       if (Array.isArray(snapshot.chatMessages)) {
-        setChatMessages(snapshot.chatMessages);
+        setChatMessages((current) => {
+          const unconfirmedLocalMessages = current.filter(
+            (message) =>
+              message.id.startsWith('msg_local_') &&
+              !snapshot.chatMessages!.some(
+                (remoteMessage) =>
+                  remoteMessage.peerId === message.peerId &&
+                  remoteMessage.text === message.text &&
+                  Math.abs(remoteMessage.createdAtMs - message.createdAtMs) < 30_000
+              )
+          );
+          return [...snapshot.chatMessages!, ...unconfirmedLocalMessages]
+            .sort((a, b) => a.createdAtMs - b.createdAtMs)
+            .slice(-60);
+        });
       }
       applyAuthoritativeMedia(snapshot.media, snapshot.playback?.actorId);
       if (snapshot.playback) {
@@ -630,6 +647,9 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           }
 
           if (mType === 'chat:message' && msg.message) {
+            if (typeof msg.seq === 'number') {
+              seqRef.current = Math.max(seqRef.current, msg.seq);
+            }
             const chatMsg = msg.message as ChatMessage;
             setChatMessages((prev) => {
               if (prev.some((m) => m.id === chatMsg.id)) return prev;
@@ -798,33 +818,36 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         const resolvedMedia = data.room?.media || null;
 
         if (data.room && resolvedMedia) {
-          seqRef.current = Math.max(seqRef.current, data.room.seq || 0);
-          setSyncedMedia(resolvedMedia);
-          setSyncedPlayback(data.room.playback);
+          const responseSeq = data.room.seq || 0;
+          if (responseSeq >= seqRef.current) {
+            seqRef.current = responseSeq;
+            setSyncedMedia(resolvedMedia);
+            setSyncedPlayback(data.room.playback);
 
-          // Emit both event names so parent room iframe or popup catches selection in 0ms
-          postCrossWindowBridgeMessage({
-            type: 'LOVEFLIX_MEDIA_SELECTED',
-            roomId: activeConfig.roomId,
-            media: resolvedMedia,
-            playback: data.room.playback,
-          });
-          postCrossWindowBridgeMessage({
-            type: 'LOVEFLIX_ROOM_MEDIA',
-            roomId: activeConfig.roomId,
-            media: resolvedMedia,
-            playback: data.room.playback,
-          });
+            // Emit both event names so parent room iframe or popup catches selection in 0ms
+            postCrossWindowBridgeMessage({
+              type: 'LOVEFLIX_MEDIA_SELECTED',
+              roomId: activeConfig.roomId,
+              media: resolvedMedia,
+              playback: data.room.playback,
+            });
+            postCrossWindowBridgeMessage({
+              type: 'LOVEFLIX_ROOM_MEDIA',
+              roomId: activeConfig.roomId,
+              media: resolvedMedia,
+              playback: data.room.playback,
+            });
 
-          if (externalWsRef.current && externalWsRef.current.readyState === WebSocket.OPEN) {
-            externalWsRef.current.send(
-              JSON.stringify({
-                type: 'loveflix:media',
-                roomId: activeConfig.roomId,
-                media: resolvedMedia,
-                playback: data.room.playback,
-              })
-            );
+            if (externalWsRef.current && externalWsRef.current.readyState === WebSocket.OPEN) {
+              externalWsRef.current.send(
+                JSON.stringify({
+                  type: 'loveflix:media',
+                  roomId: activeConfig.roomId,
+                  media: resolvedMedia,
+                  playback: data.room.playback,
+                })
+              );
+            }
           }
         }
         return resolvedMedia;
