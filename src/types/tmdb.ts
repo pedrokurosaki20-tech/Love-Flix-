@@ -123,6 +123,33 @@ export interface TMDBSeasonDetail {
   episodes: TMDBEpisode[];
 }
 
+export interface TMDBEpisodeGroupSummary {
+  id: string;
+  name: string;
+  description: string;
+  episode_count: number;
+  group_count: number;
+  type: number;
+}
+
+export interface TMDBEpisodeGroupUnit {
+  id: string;
+  name: string;
+  order: number;
+  locked: boolean;
+  episodes: Array<TMDBEpisode & { order?: number; show_id?: number }>;
+}
+
+export interface TMDBEpisodeGroupDetail {
+  id: string;
+  name: string;
+  description: string;
+  episode_count: number;
+  group_count: number;
+  type: number;
+  groups: TMDBEpisodeGroupUnit[];
+}
+
 export interface TMDBReleaseDatesResult {
   iso_3166_1: string;
   release_dates: Array<{
@@ -153,6 +180,9 @@ export interface TMDBMediaDetail extends TMDBMediaItem {
   number_of_seasons?: number;
   number_of_episodes?: number;
   seasons?: TMDBSeasonSummary[];
+  episode_groups?: {
+    results: TMDBEpisodeGroupSummary[];
+  };
   created_by?: Array<{ id: number; name: string; profile_path: string | null }>;
   production_companies?: TMDBProductionCompany[];
   production_countries?: TMDBProductionCountry[];

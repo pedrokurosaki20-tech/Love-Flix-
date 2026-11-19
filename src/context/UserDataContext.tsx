@@ -126,24 +126,53 @@ interface UserDataContextValue {
   // Autenticação & Sincronização de Conta
   isLoggedIn: boolean;
   isAuthReady: boolean;
+  isPasswordRecovery: boolean;
+  isConfirmedRedirectTab: boolean;
+  dismissConfirmedRedirectTab: () => void;
+  pendingEmailConfirmation: {
+    email: string;
+    name: string;
+    token: string;
+  } | null;
+  clearPendingEmailConfirmation: () => void;
+  checkPendingEmailConfirmation: (
+    manual?: boolean
+  ) => Promise<{ confirmed: boolean; message?: string }>;
+  authRedirectNotice: { type: 'success' | 'error'; text: string } | null;
+  clearAuthRedirectNotice: () => void;
   currentAccount: UserAccount | null;
   login: (
-    emailOrPhone: string,
+    email: string,
     pass: string
-  ) => Promise<{ success: boolean; message?: string; authenticated?: boolean }>;
+  ) => Promise<{
+    success: boolean;
+    message?: string;
+    authenticated?: boolean;
+    needsEmailConfirmation?: boolean;
+    email?: string;
+  }>;
   register: (data: {
     name: string;
     email: string;
     password: string;
     phone: string;
     avatarSrc?: string;
-  }) => Promise<{ success: boolean; message?: string; authenticated?: boolean }>;
+  }) => Promise<{
+    success: boolean;
+    message?: string;
+    authenticated?: boolean;
+    needsEmailConfirmation?: boolean;
+    email?: string;
+  }>;
+  resendConfirmationEmail: (email: string) => Promise<{ success: boolean; message?: string }>;
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; message?: string }>;
+  completePasswordRecovery: (newPass: string) => Promise<{ success: boolean; message?: string }>;
   logout: () => Promise<void>;
   changePassword: (oldPass: string, newPass: string) => Promise<{ success: boolean; message?: string }>;
   requestContactChange: (
     kind: 'email' | 'phone',
     target: string
-  ) => Promise<{ success: boolean; message?: string }>;
+  ) => Promise<{ success: boolean; message?: string; mode?: 'otp' | 'supabase_link' }>;
   verifyContactChange: (
     kind: 'email' | 'phone',
     target: string,
@@ -298,6 +327,46 @@ interface AuthSessionState {
   activeProfileId: string | null;
 }
 
+const PENDING_CONFIRM_SESSION_KEY = 'loveflix_pending_email_confirm_v1';
+const DNS_PENDING_EMAIL_KEY = 'loveflix_dns_welcome_pending_email';
+const DNS_SEEN_PREFIX = 'loveflix_dns_seen_v1_';
+
+interface PendingEmailConfirmationInternal {
+  email: string;
+  password: string;
+  name: string;
+  token: string;
+  createdAt: number;
+}
+
+function generateConfirmToken(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().replace(/-/g, '');
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`.slice(0, 32);
+}
+
+function loadPendingConfirmation(): PendingEmailConfirmationInternal | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_CONFIRM_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingEmailConfirmationInternal;
+    if (
+      parsed &&
+      parsed.email &&
+      parsed.password &&
+      parsed.token &&
+      Date.now() - (parsed.createdAt || 0) < 30 * 60 * 1000
+    ) {
+      return parsed;
+    }
+    sessionStorage.removeItem(PENDING_CONFIRM_SESSION_KEY);
+  } catch {
+    // ignore storage access issues
+  }
+  return null;
+}
+
 const UserDataContext = createContext<UserDataContextValue | null>(null);
 
 export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -308,6 +377,14 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Supabase owns credentials and the authenticated session; account secrets never live in localStorage.
   const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
+  const [isConfirmedRedirectTab, setIsConfirmedRedirectTab] = useState(false);
+  const [pendingConfirmationState, setPendingConfirmationState] =
+    useState<PendingEmailConfirmationInternal | null>(loadPendingConfirmation);
+  const [authRedirectNotice, setAuthRedirectNotice] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
   const [authSession, setAuthSession] = useState<AuthSessionState>({
     isLoggedIn: false,
     activeAccountId: '',
@@ -317,7 +394,7 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [authModalInitialMode, setAuthModalInitialMode] = useState<'login' | 'register'>('login');
 
   // Estado para os alertas orientativos e de agradecimento da DNS
-  const [showDnsWelcomePrompt, setShowDnsWelcomePrompt] = useState<boolean>(false);
+  const [showDnsWelcomePromptState, setShowDnsWelcomePromptState] = useState<boolean>(false);
   const [showDnsThankYouPrompt, setShowDnsThankYouPrompt] = useState<boolean>(false);
   const [isDnsFlowPendingReturn, setIsDnsFlowPendingReturn] = useState<boolean>(false);
 
@@ -453,6 +530,74 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, 2800);
   }, []);
 
+  const setShowDnsWelcomePrompt = useCallback(
+    (show: boolean) => {
+      setShowDnsWelcomePromptState(show);
+      if (!show && authUser?.id) {
+        try {
+          localStorage.setItem(`${DNS_SEEN_PREFIX}${authUser.id}`, '1');
+          localStorage.removeItem(DNS_PENDING_EMAIL_KEY);
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [authUser?.id]
+  );
+
+  const savePendingConfirmation = useCallback(
+    (entry: PendingEmailConfirmationInternal | null) => {
+      setPendingConfirmationState(entry);
+      try {
+        if (entry) {
+          sessionStorage.setItem(PENDING_CONFIRM_SESSION_KEY, JSON.stringify(entry));
+        } else {
+          sessionStorage.removeItem(PENDING_CONFIRM_SESSION_KEY);
+        }
+      } catch {
+        // ignore
+      }
+    },
+    []
+  );
+
+  const clearPendingEmailConfirmation = useCallback(() => {
+    savePendingConfirmation(null);
+  }, [savePendingConfirmation]);
+
+  const dismissConfirmedRedirectTab = useCallback(() => {
+    setIsConfirmedRedirectTab(false);
+  }, []);
+
+  const clearAuthRedirectNotice = useCallback(() => {
+    setAuthRedirectNotice(null);
+  }, []);
+
+  const maybeActivateDnsWelcomeForUser = useCallback(
+    (user: SupabaseUser | null, forceFromConfirm = false) => {
+      if (!user) return;
+      try {
+        const userEmail = (user.email || '').trim().toLowerCase();
+        const pendingDnsEmail = (localStorage.getItem(DNS_PENDING_EMAIL_KEY) || '')
+          .trim()
+          .toLowerCase();
+        const alreadySeen = Boolean(localStorage.getItem(`${DNS_SEEN_PREFIX}${user.id}`));
+        const createdMs = Date.parse(user.created_at || '');
+        const isBrandNewAccount =
+          Number.isFinite(createdMs) && Date.now() - createdMs < 24 * 60 * 60 * 1000;
+
+        if (!alreadySeen && (forceFromConfirm || (userEmail && pendingDnsEmail === userEmail) || isBrandNewAccount)) {
+          setShowDnsWelcomePromptState(true);
+        }
+      } catch {
+        if (forceFromConfirm) {
+          setShowDnsWelcomePromptState(true);
+        }
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     try {
       localStorage.removeItem(ACCOUNTS_STORAGE_KEY);
@@ -461,12 +606,59 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       console.error('Unable to clear legacy local account credentials.', error);
     }
 
+    const searchParams =
+      typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const hashRaw = typeof window !== 'undefined' ? window.location.hash.replace(/^#/, '') : '';
+    const hashParams = new URLSearchParams(hashRaw);
+    const redirectError =
+      searchParams?.get('error_description') ||
+      hashParams.get('error_description') ||
+      searchParams?.get('error') ||
+      hashParams.get('error');
+    const callbackType = hashParams.get('type') || searchParams?.get('type') || '';
+    const hasPkceCode = Boolean(searchParams?.get('code'));
+    const lfConfirmToken = searchParams?.get('lf_confirm') || '';
+
+    const notifyHandoffConfirmed = (token: string) => {
+      if (!token) return;
+      void fetch('/api/auth/confirm-handoff/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      }).catch(() => {
+        // fallback handled by focus signInWithPassword
+      });
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          const ch = new BroadcastChannel('loveflix_auth_handoff');
+          ch.postMessage({ token, confirmed: true });
+          ch.close();
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    if (redirectError) {
+      const lowered = redirectError.toLowerCase();
+      setAuthRedirectNotice({
+        type: 'error',
+        text: lowered.includes('expired') || lowered.includes('invalid')
+          ? 'O link de confirmação expirou ou já foi utilizado. Solicite um novo envio abaixo.'
+          : 'Não foi possível validar o link recebido no e-mail. Tente novamente.',
+      });
+    } else if (callbackType === 'recovery') {
+      setIsPasswordRecovery(true);
+    }
+
     if (!supabase) {
       setIsAuthReady(true);
       return;
     }
 
     let active = true;
+    let handoffSent = false;
+
     const acceptSession = (user: SupabaseUser | null) => {
       setAuthUser(user);
       setAuthSession((previous) => ({
@@ -479,8 +671,53 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (active) acceptSession(session?.user || null);
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!active) return;
+      acceptSession(session?.user || null);
+
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsPasswordRecovery(true);
+        setAuthRedirectNotice({
+          type: 'success',
+          text: 'Link validado! Defina sua nova senha de acesso abaixo.',
+        });
+      } else if (event === 'SIGNED_IN' && session?.user) {
+        if (lfConfirmToken || callbackType === 'signup' || hasPkceCode) {
+          if (lfConfirmToken && !redirectError && !handoffSent) {
+            handoffSent = true;
+            notifyHandoffConfirmed(lfConfirmToken);
+          }
+          if (lfConfirmToken || callbackType === 'signup') {
+            setIsConfirmedRedirectTab(true);
+          }
+          savePendingConfirmation(null);
+          pushToast('E-mail confirmado com sucesso! Seja bem-vindo(a).', 'accent');
+          maybeActivateDnsWelcomeForUser(session.user, true);
+        } else if (callbackType === 'email_change') {
+          pushToast('Novo e-mail confirmado e atualizado com sucesso!', 'accent');
+        } else {
+          maybeActivateDnsWelcomeForUser(session.user, false);
+        }
+      } else if (event === 'USER_UPDATED' && session?.user) {
+        const updatedEmail = session.user.email || '';
+        setState((previous) => ({
+          ...previous,
+          profiles: Object.fromEntries(
+            Object.entries(previous.profiles).map(([id, bucket]) => [
+              id,
+              bucket.profile.accountId === session.user.id
+                ? {
+                    ...bucket,
+                    profile: {
+                      ...bucket.profile,
+                      email: updatedEmail || bucket.profile.email,
+                    },
+                  }
+                : bucket,
+            ])
+          ),
+        }));
+      }
     });
 
     void supabase.auth
@@ -492,6 +729,28 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           pushToast('Não foi possível restaurar sua sessão. Entre novamente.');
         }
         acceptSession(data.session?.user || null);
+        if (data.session?.user) {
+          maybeActivateDnsWelcomeForUser(
+            data.session.user,
+            Boolean(lfConfirmToken || callbackType === 'signup' || hasPkceCode)
+          );
+        }
+        if (lfConfirmToken && !redirectError && !handoffSent && (data.session || hasPkceCode)) {
+          handoffSent = true;
+          notifyHandoffConfirmed(lfConfirmToken);
+          setIsConfirmedRedirectTab(true);
+        }
+        if (
+          typeof window !== 'undefined' &&
+          (searchParams?.has('code') ||
+            searchParams?.has('lf_confirm') ||
+            searchParams?.has('error') ||
+            searchParams?.has('error_description') ||
+            hashParams.has('access_token') ||
+            hashParams.has('error'))
+        ) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
       })
       .catch((error: unknown) => {
         if (!active) return;
@@ -507,7 +766,7 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       active = false;
       subscription.unsubscribe();
     };
-  }, [pushToast]);
+  }, [pushToast, savePendingConfirmation, maybeActivateDnsWelcomeForUser]);
 
   const openAuthModal = useCallback((mode: 'login' | 'register' = 'login') => {
     setAuthModalInitialMode(mode);
@@ -742,7 +1001,14 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const cleanId = identifier.trim().toLowerCase();
       const cleanPass = pass.trim();
       if (!cleanId || !cleanPass) {
-        return { success: false, message: 'Preencha o e-mail ou celular e a senha de acesso.' };
+        return { success: false, message: 'Preencha seu e-mail e a senha de acesso.' };
+      }
+      if (!cleanId.includes('@')) {
+        return {
+          success: false,
+          message:
+            'No momento o acesso seguro é feito com seu e-mail confirmado. Informe o e-mail cadastrado.',
+        };
       }
       if (!supabase) {
         return {
@@ -751,25 +1017,50 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
       }
 
-      const credentials = cleanId.includes('@')
-        ? { email: cleanId, password: cleanPass }
-        : {
-            phone: cleanId.startsWith('+')
-              ? `+${normalizePhone(cleanId)}`
-              : `+55${normalizePhone(cleanId)}`,
-            password: cleanPass,
-          };
-      const { data, error } = await supabase.auth.signInWithPassword(credentials);
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanId,
+        password: cleanPass,
+      });
+
       if (error || !data.user) {
+        const msg = (error?.message || '').toLowerCase();
+        if (msg.includes('email not confirmed')) {
+          const token = generateConfirmToken();
+          savePendingConfirmation({
+            email: cleanId,
+            password: cleanPass,
+            name: '',
+            token,
+            createdAt: Date.now(),
+          });
+          try {
+            localStorage.setItem(DNS_PENDING_EMAIL_KEY, cleanId);
+          } catch {
+            // ignore
+          }
+          return {
+            success: false,
+            needsEmailConfirmation: true,
+            email: cleanId,
+            message:
+              'Seu e-mail ainda não foi confirmado. Confirme pelo link enviado na sua caixa de entrada.',
+          };
+        }
+        if (msg.includes('rate limit') || msg.includes('too many requests')) {
+          return {
+            success: false,
+            message: 'Muitas tentativas em sequência. Aguarde alguns instantes e tente novamente.',
+          };
+        }
         return {
           success: false,
-          message:
-            error?.message === 'Email not confirmed'
-              ? 'Confirme seu e-mail pelo link enviado antes de entrar.'
-              : 'E-mail, celular ou senha incorretos. Verifique suas credenciais.',
+          message: 'E-mail ou senha incorretos. Verifique seus dados e tente novamente.',
         };
       }
 
+      savePendingConfirmation(null);
+      setIsPasswordRecovery(false);
+      setAuthRedirectNotice(null);
       setAuthUser(data.user);
       setAuthSession({
         isLoggedIn: true,
@@ -781,10 +1072,11 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         activeProfileId: null,
       }));
       setAuthModalOpen(false);
+      maybeActivateDnsWelcomeForUser(data.user, false);
       pushToast('Bem-vindo de volta! Selecione quem está assistindo.', 'accent');
       return { success: true, authenticated: true };
     },
-    [pushToast]
+    [pushToast, savePendingConfirmation, maybeActivateDnsWelcomeForUser]
   );
 
   const register = useCallback(
@@ -808,7 +1100,10 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return { success: false, message: 'Informe um endereço de e-mail válido.' };
       }
       if (!cleanPhone || normalizedPhone.length < 10) {
-        return { success: false, message: 'Informe um número de celular válido com DDD (mínimo 10 dígitos).' };
+        return {
+          success: false,
+          message: 'Informe um número de celular válido com DDD (mínimo 10 dígitos).',
+        };
       }
       if (!cleanPass || cleanPass.length < 6) {
         return { success: false, message: 'A senha de acesso deve ter no mínimo 6 caracteres.' };
@@ -820,10 +1115,17 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
       }
 
+      const confirmToken = generateConfirmToken();
+      const emailRedirectTo =
+        typeof window !== 'undefined'
+          ? `${window.location.origin}/?lf_confirm=${encodeURIComponent(confirmToken)}`
+          : undefined;
+
       const { data: authData, error } = await supabase.auth.signUp({
         email: cleanEmail,
         password: cleanPass,
         options: {
+          emailRedirectTo,
           data: {
             name: cleanName,
             phone: cleanPhone,
@@ -832,17 +1134,51 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         },
       });
       if (error) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes('already registered') || msg.includes('already been registered')) {
+          return {
+            success: false,
+            message: 'Este endereço de e-mail já está cadastrado em outra conta.',
+          };
+        }
+        if (msg.includes('rate limit') || msg.includes('too many requests') || msg.includes('seconds')) {
+          return {
+            success: false,
+            message: 'Aguarde alguns instantes antes de solicitar um novo cadastro.',
+          };
+        }
+        if (msg.includes('password')) {
+          return {
+            success: false,
+            message: 'Escolha uma senha mais forte com pelo menos 6 caracteres.',
+          };
+        }
         return {
           success: false,
-          message:
-            error.message.toLowerCase().includes('already registered') ||
-            error.message.toLowerCase().includes('already been registered')
-              ? 'Este endereço de e-mail já está cadastrado em outra conta.'
-              : 'Não foi possível criar a conta. Confira os dados e tente novamente.',
+          message: 'Não foi possível criar a conta. Confira os dados e tente novamente.',
         };
       }
 
+      // Supabase anti-enumeration: e-mail já existente retorna user com identities vazio
+      if (
+        authData.user &&
+        Array.isArray(authData.user.identities) &&
+        authData.user.identities.length === 0
+      ) {
+        return {
+          success: false,
+          message: 'Este endereço de e-mail já está cadastrado. Faça login ou redefina sua senha.',
+        };
+      }
+
+      try {
+        localStorage.setItem(DNS_PENDING_EMAIL_KEY, cleanEmail);
+      } catch {
+        // ignore
+      }
+
       if (authData.session && authData.user) {
+        savePendingConfirmation(null);
         setAuthUser(authData.user);
         setAuthSession({
           isLoggedIn: true,
@@ -850,19 +1186,269 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           activeProfileId: null,
         });
         setState((prev) => ({ ...prev, activeProfileId: null }));
-      }
-
-      if (authData.session) {
         setAuthModalOpen(false);
         pushToast(`Conta criada com sucesso! Bem-vindo(a), ${cleanName}!`, 'accent');
-        setShowDnsWelcomePrompt(true);
+        maybeActivateDnsWelcomeForUser(authData.user, true);
         return { success: true, message: 'Conta criada com sucesso.', authenticated: true };
       }
+
+      savePendingConfirmation({
+        email: cleanEmail,
+        password: cleanPass,
+        name: cleanName,
+        token: confirmToken,
+        createdAt: Date.now(),
+      });
+
       return {
         success: true,
-        message: 'Enviamos um link de confirmação para seu e-mail. Confirme-o para entrar.',
+        needsEmailConfirmation: true,
+        email: cleanEmail,
+        message: `Enviamos um link de confirmação para ${cleanEmail}.`,
         authenticated: false,
       };
+    },
+    [pushToast, savePendingConfirmation, maybeActivateDnsWelcomeForUser]
+  );
+
+  const checkPendingEmailConfirmation = useCallback(
+    async (manual = false): Promise<{ confirmed: boolean; message?: string }> => {
+      if (!supabase || !pendingConfirmationState) {
+        return { confirmed: false };
+      }
+
+      const { email, password, name } = pendingConfirmationState;
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error || !data.user) {
+        const msg = (error?.message || '').toLowerCase();
+        if (msg.includes('email not confirmed')) {
+          return {
+            confirmed: false,
+            message: manual
+              ? 'Seu e-mail ainda não foi confirmado. Abra o link enviado na sua caixa de entrada e tente novamente.'
+              : undefined,
+          };
+        }
+        if (manual) {
+          return {
+            confirmed: false,
+            message: 'Ainda aguardando a confirmação do e-mail. Tente novamente em instantes.',
+          };
+        }
+        return { confirmed: false };
+      }
+
+      savePendingConfirmation(null);
+      setIsPasswordRecovery(false);
+      setAuthRedirectNotice(null);
+      setAuthUser(data.user);
+      setAuthSession({
+        isLoggedIn: true,
+        activeAccountId: data.user.id,
+        activeProfileId: null,
+      });
+      setState((prev) => ({
+        ...prev,
+        activeProfileId: null,
+      }));
+      setAuthModalOpen(false);
+      maybeActivateDnsWelcomeForUser(data.user, true);
+      pushToast(
+        name
+          ? `E-mail confirmado! Bem-vindo(a), ${name}!`
+          : 'E-mail confirmado com sucesso!',
+        'accent'
+      );
+      return { confirmed: true };
+    },
+    [
+      pendingConfirmationState,
+      savePendingConfirmation,
+      maybeActivateDnsWelcomeForUser,
+      pushToast,
+    ]
+  );
+
+  // Ouvinte automático para detectar quando o usuário confirmou no e-mail e voltou ao navegador
+  useEffect(() => {
+    if (!pendingConfirmationState || authSession.isLoggedIn) return;
+
+    let active = true;
+    let checking = false;
+    let lastFallbackAttempt = 0;
+
+    const trySignIn = async (force = false) => {
+      if (!active || checking) return;
+      const now = Date.now();
+      if (!force && now - lastFallbackAttempt < 5500) return;
+      lastFallbackAttempt = now;
+      checking = true;
+      try {
+        await checkPendingEmailConfirmation(false);
+      } finally {
+        checking = false;
+      }
+    };
+
+    const pollHandoffServer = async () => {
+      if (!active || checking) return;
+      try {
+        const res = await fetch(
+          `/api/auth/confirm-handoff/status?token=${encodeURIComponent(
+            pendingConfirmationState.token
+          )}`
+        );
+        if (!res.ok) return;
+        const body = (await res.json()) as { ok?: boolean; confirmed?: boolean };
+        if (body.confirmed) {
+          await trySignIn(true);
+        }
+      } catch {
+        // ignore network hiccup during polling
+      }
+    };
+
+    const pollTimer = window.setInterval(() => {
+      void pollHandoffServer();
+    }, 2500);
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        bc = new BroadcastChannel('loveflix_auth_handoff');
+        bc.onmessage = (event: MessageEvent<{ token?: string; confirmed?: boolean }>) => {
+          if (
+            event.data?.confirmed &&
+            event.data?.token === pendingConfirmationState.token
+          ) {
+            void trySignIn(true);
+          }
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    const handleReturnToBrowser = () => {
+      if (document.visibilityState === 'hidden') return;
+      void pollHandoffServer();
+      window.setTimeout(() => {
+        void trySignIn(false);
+      }, 350);
+    };
+
+    window.addEventListener('focus', handleReturnToBrowser);
+    document.addEventListener('visibilitychange', handleReturnToBrowser);
+
+    return () => {
+      active = false;
+      window.clearInterval(pollTimer);
+      if (bc) bc.close();
+      window.removeEventListener('focus', handleReturnToBrowser);
+      document.removeEventListener('visibilitychange', handleReturnToBrowser);
+    };
+  }, [pendingConfirmationState, authSession.isLoggedIn, checkPendingEmailConfirmation]);
+
+  const resendConfirmationEmail = useCallback(
+    async (email: string) => {
+      const cleanEmail = email.trim().toLowerCase();
+      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        return { success: false, message: 'Informe um e-mail válido para reenviar a confirmação.' };
+      }
+      if (!supabase) {
+        return { success: false, message: 'Serviço de autenticação não configurado.' };
+      }
+
+      const token = pendingConfirmationState?.token || generateConfirmToken();
+      const emailRedirectTo =
+        typeof window !== 'undefined'
+          ? `${window.location.origin}/?lf_confirm=${encodeURIComponent(token)}`
+          : undefined;
+
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: cleanEmail,
+        options: { emailRedirectTo },
+      });
+
+      if (error) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes('rate limit') || msg.includes('seconds') || msg.includes('too many')) {
+          return {
+            success: false,
+            message: 'Aguarde 1 minuto antes de solicitar outro e-mail de confirmação.',
+          };
+        }
+        return {
+          success: false,
+          message: 'Não foi possível reenviar o e-mail agora. Tente novamente em instantes.',
+        };
+      }
+
+      return {
+        success: true,
+        message: `Reenviamos o link de confirmação para ${cleanEmail}. Confira também a pasta de Spam.`,
+      };
+    },
+    [pendingConfirmationState?.token]
+  );
+
+  const requestPasswordReset = useCallback(async (email: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { success: false, message: 'Informe o e-mail cadastrado na sua conta.' };
+    }
+    if (!supabase) {
+      return { success: false, message: 'Serviço de autenticação não configurado.' };
+    }
+
+    const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined;
+    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, { redirectTo });
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes('rate limit') || msg.includes('seconds') || msg.includes('too many')) {
+        return {
+          success: false,
+          message: 'Aguarde alguns instantes antes de solicitar outro link de recuperação.',
+        };
+      }
+      return {
+        success: false,
+        message: 'Não foi possível enviar o link de recuperação agora.',
+      };
+    }
+
+    return {
+      success: true,
+      message: `Se ${cleanEmail} estiver cadastrado, enviaremos um link seguro para redefinir sua senha.`,
+    };
+  }, []);
+
+  const completePasswordRecovery = useCallback(
+    async (newPass: string) => {
+      const cleanPass = newPass.trim();
+      if (!supabase) {
+        return { success: false, message: 'Serviço de autenticação não configurado.' };
+      }
+      if (cleanPass.length < 6) {
+        return { success: false, message: 'A nova senha deve ter no mínimo 6 caracteres.' };
+      }
+      const { data, error } = await supabase.auth.updateUser({ password: cleanPass });
+      if (error) {
+        return {
+          success: false,
+          message: 'Não foi possível salvar a nova senha. Solicite um novo link se expirou.',
+        };
+      }
+      setIsPasswordRecovery(false);
+      setAuthRedirectNotice(null);
+      if (data.user) setAuthUser(data.user);
+      pushToast('Senha redefinida com sucesso!', 'accent');
+      return { success: true, message: 'Senha redefinida com sucesso!' };
     },
     [pushToast]
   );
@@ -875,6 +1461,8 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
     }
+    setIsPasswordRecovery(false);
+    setAuthRedirectNotice(null);
     setAuthUser(null);
     setAuthSession({ isLoggedIn: false, activeAccountId: '', activeProfileId: null });
     setState((prev) => ({
@@ -930,15 +1518,46 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           body: JSON.stringify({ kind, target }),
         });
         const result = (await response.json()) as { ok?: boolean; error?: string; message?: string };
+
+        // Se o servidor não tiver SMTP/Service Role configurados (503), usa a confirmação nativa do Supabase para troca de e-mail
+        if (response.status === 503 && kind === 'email') {
+          const cleanTarget = target.trim().toLowerCase();
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanTarget)) {
+            return { success: false, message: 'Informe um endereço de e-mail válido.' };
+          }
+          if (cleanTarget === (data.session.user.email || '').toLowerCase()) {
+            return { success: false, message: 'O novo e-mail deve ser diferente do atual.' };
+          }
+          const emailRedirectTo =
+            typeof window !== 'undefined' ? window.location.origin : undefined;
+          const { error: updateError } = await supabase.auth.updateUser(
+            { email: cleanTarget },
+            { emailRedirectTo }
+          );
+          if (updateError) {
+            return {
+              success: false,
+              message: updateError.message.toLowerCase().includes('already')
+                ? 'Este e-mail já está em uso por outra conta.'
+                : 'Não foi possível solicitar a troca de e-mail agora.',
+            };
+          }
+          return {
+            success: true,
+            mode: 'supabase_link' as const,
+            message: `Enviamos um link de confirmação para ${cleanTarget}. Clique no link para concluir a troca de e-mail.`,
+          };
+        }
+
         if (!response.ok || !result.ok) {
           return {
             success: false,
             message: result.error || 'Não foi possível enviar o código agora.',
           };
         }
-        return { success: true, message: result.message };
+        return { success: true, mode: 'otp' as const, message: result.message };
       } catch {
-        return { success: false, message: 'Falha de conexão ao solicitar o código.' };
+        return { success: false, message: 'Falha de conexão ao solicitar a verificação.' };
       }
     },
     []
@@ -1256,9 +1875,26 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       isLoggedIn: authSession.isLoggedIn,
       isAuthReady,
+      isPasswordRecovery,
+      isConfirmedRedirectTab,
+      dismissConfirmedRedirectTab,
+      pendingEmailConfirmation: pendingConfirmationState
+        ? {
+            email: pendingConfirmationState.email,
+            name: pendingConfirmationState.name,
+            token: pendingConfirmationState.token,
+          }
+        : null,
+      clearPendingEmailConfirmation,
+      checkPendingEmailConfirmation,
+      authRedirectNotice,
+      clearAuthRedirectNotice,
       currentAccount,
       login,
       register,
+      resendConfirmationEmail,
+      requestPasswordReset,
+      completePasswordRecovery,
       logout,
       changePassword,
       requestContactChange,
@@ -1269,7 +1905,7 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       closeAuthModal,
 
       // Avisos de DNS pós-cadastro
-      showDnsWelcomePrompt,
+      showDnsWelcomePrompt: showDnsWelcomePromptState,
       setShowDnsWelcomePrompt,
       showDnsThankYouPrompt,
       setShowDnsThankYouPrompt,
@@ -1320,9 +1956,20 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updateProfile,
       authSession.isLoggedIn,
       isAuthReady,
+      isPasswordRecovery,
+      isConfirmedRedirectTab,
+      dismissConfirmedRedirectTab,
+      pendingConfirmationState,
+      clearPendingEmailConfirmation,
+      checkPendingEmailConfirmation,
+      authRedirectNotice,
+      clearAuthRedirectNotice,
       currentAccount,
       login,
       register,
+      resendConfirmationEmail,
+      requestPasswordReset,
+      completePasswordRecovery,
       logout,
       changePassword,
       requestContactChange,
@@ -1331,7 +1978,8 @@ export const UserDataProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       authModalInitialMode,
       openAuthModal,
       closeAuthModal,
-      showDnsWelcomePrompt,
+      showDnsWelcomePromptState,
+      setShowDnsWelcomePrompt,
       showDnsThankYouPrompt,
       isDnsFlowPendingReturn,
       continueWatching,

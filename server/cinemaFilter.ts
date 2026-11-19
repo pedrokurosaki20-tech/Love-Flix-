@@ -97,7 +97,11 @@ async function probeChannelOne(tmdbId: string): Promise<boolean> {
   if (cached && cached.expiresAt > Date.now()) return cached.available;
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': BROWSER_USER_AGENT, Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
+      headers: {
+        'User-Agent': BROWSER_USER_AGENT,
+        Referer: 'https://supercdn.org/',
+        Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+      },
       redirect: 'follow',
       signal: AbortSignal.timeout(3500),
     });

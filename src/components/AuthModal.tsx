@@ -2,11 +2,25 @@ import React from 'react';
 import { X } from 'lucide-react';
 import { useUserData } from '../context/UserDataContext';
 import { AuthCard } from './AuthCard';
+import { EmailConfirmationCard } from './EmailConfirmationCard';
 
 export const AuthModal: React.FC = () => {
-  const { isAuthModalOpen, closeAuthModal, authModalInitialMode } = useUserData();
+  const {
+    isAuthModalOpen,
+    closeAuthModal,
+    authModalInitialMode,
+    pendingEmailConfirmation,
+  } = useUserData();
 
   if (!isAuthModalOpen) return null;
+
+  if (pendingEmailConfirmation) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fade-in">
+        <EmailConfirmationCard onSuccess={closeAuthModal} />
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in overflow-y-auto">

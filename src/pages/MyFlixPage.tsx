@@ -137,7 +137,7 @@ export const MyFlixPage: React.FC = () => {
   const [accountEmail, setAccountEmail] = useState(currentAccount?.email || '');
   const [accountPhone, setAccountPhone] = useState(currentAccount?.phone || '');
   const [editingContact, setEditingContact] = useState<ContactKind | null>(null);
-  const [contactStep, setContactStep] = useState<'edit' | 'code'>('edit');
+  const [contactStep, setContactStep] = useState<'edit' | 'code' | 'link_sent'>('edit');
   const [contactDraft, setContactDraft] = useState('');
   const [contactCode, setContactCode] = useState('');
   const [contactError, setContactError] = useState('');
@@ -320,7 +320,7 @@ export const MyFlixPage: React.FC = () => {
       return;
     }
     setContactDraft(target);
-    setContactStep('code');
+    setContactStep(result.mode === 'supabase_link' ? 'link_sent' : 'code');
     setContactMessage(result.message || 'Código enviado.');
   };
 
@@ -379,7 +379,11 @@ export const MyFlixPage: React.FC = () => {
     return (
       <div className="space-y-3 border-t border-white/[0.06] bg-black/40 p-4 sm:p-5 animate-fade-in">
         <p className="text-xs font-semibold text-white">
-          {contactStep === 'edit' ? `Digite o novo ${label}` : 'Confirme o código de segurança'}
+          {contactStep === 'edit'
+            ? `Digite o novo ${label}`
+            : contactStep === 'link_sent'
+            ? 'Confirme pelo link enviado no e-mail'
+            : 'Confirme o código de segurança'}
         </p>
         {contactError && (
           <div className="rounded-xl border border-red-500/30 bg-red-500/15 p-2.5 text-center text-xs font-medium text-[#FF4757]">
@@ -395,6 +399,10 @@ export const MyFlixPage: React.FC = () => {
             placeholder={kind === 'email' ? 'seu.email@exemplo.com' : '+5511999999999'}
             className="w-full rounded-xl border border-white/12 bg-[#1c1c1c] px-3.5 py-2.5 text-sm text-white placeholder:text-white/35 focus:border-[#E50914] focus:outline-none"
           />
+        ) : contactStep === 'link_sent' ? (
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 leading-relaxed">
+            {contactMessage}
+          </div>
         ) : (
           <>
             <p className="text-xs text-white/60">{contactMessage}</p>
@@ -422,7 +430,7 @@ export const MyFlixPage: React.FC = () => {
             }}
             className="rounded-lg px-3 py-2 text-xs font-semibold text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white"
           >
-            Cancelar
+            {contactStep === 'link_sent' ? 'Fechar' : 'Cancelar'}
           </button>
           {contactStep === 'code' && (
             <button
@@ -437,25 +445,27 @@ export const MyFlixPage: React.FC = () => {
               Alterar dado
             </button>
           )}
-          <button
-            type="button"
-            disabled={
-              contactBusy ||
-              (contactStep === 'edit' ? !contactDraft.trim() : contactCode.length !== 6)
-            }
-            onClick={() =>
-              contactStep === 'edit'
-                ? void handleRequestContactCode(kind)
-                : void handleVerifyContactCode(kind)
-            }
-            className="rounded-lg bg-[#E50914] px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-[#FF253A] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {contactBusy
-              ? 'Aguarde...'
-              : contactStep === 'edit'
-                ? 'Enviar código'
-                : 'Confirmar código'}
-          </button>
+          {contactStep !== 'link_sent' && (
+            <button
+              type="button"
+              disabled={
+                contactBusy ||
+                (contactStep === 'edit' ? !contactDraft.trim() : contactCode.length !== 6)
+              }
+              onClick={() =>
+                contactStep === 'edit'
+                  ? void handleRequestContactCode(kind)
+                  : void handleVerifyContactCode(kind)
+              }
+              className="rounded-lg bg-[#E50914] px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-[#FF253A] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {contactBusy
+                ? 'Aguarde...'
+                : contactStep === 'edit'
+                  ? 'Enviar confirmação'
+                  : 'Confirmar código'}
+            </button>
+          )}
         </div>
       </div>
     );

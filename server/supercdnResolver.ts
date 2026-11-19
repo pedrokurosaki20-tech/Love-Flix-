@@ -1,6 +1,7 @@
 import {
   SUPERCDN_BASE_URL,
   BROWSER_USER_AGENT,
+  FALLBACK_SERVER_KEY,
   buildHlsProxyPath,
   warmInitialHlsStream,
   type SubtitleTrackItem,
@@ -979,4 +980,130 @@ export async function resolveStreamWithFallback(params: {
     ),
     expiresAt: Date.now() + 30 * 1000,
   };
+}
+
+const tmdbImdbCache = new Map<string, { imdb: string; expiresAt: number }>();
+const tvSearchAvailCache = new Map<string, { available: boolean; expiresAt: number }>();
+const inFlightTvSearchAvail = new Map<string, Promise<boolean>>();
+
+async function resolveTmdbImdbId(mediaType: 'movie' | 'tv', tmdbId: string): Promise<string> {
+  const key = `${mediaType}:${tmdbId}`;
+  const cached = tmdbImdbCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.imdb;
+  }
+
+  const apiKey = process.env.TMDB_API_KEY || FALLBACK_SERVER_KEY;
+  if (!apiKey) return '';
+
+  try {
+    const res = await fetch(
+      `https://api.themoviedb.org/3/${mediaType}/${encodeURIComponent(tmdbId)}/external_ids?api_key=${encodeURIComponent(apiKey)}`,
+      {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(4000),
+      }
+    );
+    if (!res.ok) return '';
+    const json = (await res.json()) as { imdb_id?: string | null };
+    const imdb = json?.imdb_id && /^tt\d{4,12}$/i.test(json.imdb_id) ? json.imdb_id : '';
+    if (tmdbImdbCache.size > 2000) {
+      const oldest = tmdbImdbCache.keys().next().value;
+      if (oldest) tmdbImdbCache.delete(oldest);
+    }
+    tmdbImdbCache.set(key, { imdb, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
+    return imdb;
+  } catch {
+    return '';
+  }
+}
+
+export async function checkMovieChannelOneAvailability(tmdbId: string): Promise<boolean> {
+  const cleanId = String(tmdbId).replace(/\D/g, '');
+  if (!cleanId) return false;
+  const imdb = await resolveTmdbImdbId('movie', cleanId);
+  const ch1 = await resolveSuperCdnChannel({
+    type: 'movie',
+    imdb,
+    tmdbId: cleanId,
+    season: '1',
+    episode: '1',
+    channel: 1,
+    warmOnly: false,
+  }).catch(() => null);
+  return Boolean(ch1 && ch1.available);
+}
+
+/**
+ * Fast 3-channel TV availability check for search & trending filtering:
+ * Canal 2 (in-memory SuperFlix catalog) -> Canal 3 (StreamBetter) -> Canal 1 (SuperCDN/VaiQueCol).
+ * Keeps every series/anime/dorama available in at least 1 of the 3 channels; excludes 0/3 titles.
+ */
+export async function checkTvSearchAvailability(tmdbId: string | number): Promise<boolean> {
+  const cleanId = String(tmdbId).replace(/\D/g, '');
+  if (!cleanId) return false;
+
+  const cached = tvSearchAvailCache.get(cleanId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.available;
+  }
+
+  const inflight = inFlightTvSearchAvail.get(cleanId);
+  if (inflight) return inflight;
+
+  const task = (async (): Promise<boolean> => {
+    try {
+      // 1. Instant 0ms in-memory check against Canal 2 (SuperFlix)
+      const sfStatus = await checkSuperFlixCatalogAvailable({
+        type: 'tvshow',
+        tmdbId: cleanId,
+      });
+      if (sfStatus === true) {
+        saveTvSearchAvailCache(cleanId, true);
+        return true;
+      }
+
+      // 2. Canal 3 (StreamBetter) live check
+      const sbUrl = `https://streambetter.lol/serie/${cleanId}/1/1?key=${STREAMBETTER_PUBLIC_KEY}`;
+      const sbOk = await probeStreamBetterAvailable(sbUrl, { failOpen: false });
+      if (sbOk) {
+        saveTvSearchAvailCache(cleanId, true);
+        return true;
+      }
+
+      // 3. Canal 1 (SuperCDN / VaiQueCol) with IMDb ID lookup fallback
+      const imdb = await resolveTmdbImdbId('tv', cleanId);
+      const ch1 = await resolveSuperCdnChannel({
+        type: 'tvshow',
+        imdb,
+        tmdbId: cleanId,
+        season: '1',
+        episode: '1',
+        channel: 1,
+        warmOnly: false,
+      }).catch(() => null);
+
+      const available = Boolean(ch1 && ch1.available);
+      saveTvSearchAvailCache(cleanId, available);
+      return available;
+    } catch {
+      return false;
+    } finally {
+      inFlightTvSearchAvail.delete(cleanId);
+    }
+  })();
+
+  inFlightTvSearchAvail.set(cleanId, task);
+  return task;
+}
+
+function saveTvSearchAvailCache(tmdbId: string, available: boolean): void {
+  if (tvSearchAvailCache.size > 2000) {
+    const oldest = tvSearchAvailCache.keys().next().value;
+    if (oldest) tvSearchAvailCache.delete(oldest);
+  }
+  tvSearchAvailCache.set(tmdbId, {
+    available,
+    expiresAt: Date.now() + (available ? 20 * 60 * 1000 : 5 * 60 * 1000),
+  });
 }

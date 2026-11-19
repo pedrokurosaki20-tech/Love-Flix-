@@ -139,8 +139,12 @@ export async function checkSuperFlixCatalogAvailable(params: {
   return false;
 }
 
-export async function probeStreamBetterAvailable(slot3Url: string): Promise<boolean> {
+export async function probeStreamBetterAvailable(
+  slot3Url: string,
+  options: { failOpen?: boolean } = {}
+): Promise<boolean> {
   if (!slot3Url) return false;
+  const failOpen = options.failOpen !== false;
   const cached = streamBetterProbeCache.get(slot3Url);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.available;
@@ -158,7 +162,7 @@ export async function probeStreamBetterAvailable(slot3Url: string): Promise<bool
           Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
         },
         redirect: 'follow',
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(4200),
       });
 
       if (res.status === 404 || res.status === 410) {
@@ -167,7 +171,7 @@ export async function probeStreamBetterAvailable(slot3Url: string): Promise<bool
       }
 
       if (res.status >= 500) {
-        return true;
+        return failOpen;
       }
 
       const text = await res.text();
@@ -179,8 +183,7 @@ export async function probeStreamBetterAvailable(slot3Url: string): Promise<bool
       saveProbeCache(slot3Url, available);
       return available;
     } catch {
-      // Fail-open on transient network timeout so a working channel is never wrongly hidden
-      return true;
+      return failOpen;
     } finally {
       inFlightStreamBetterProbes.delete(slot3Url);
     }

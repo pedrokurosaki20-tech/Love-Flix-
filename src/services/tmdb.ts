@@ -4,6 +4,8 @@ import {
   type DiscoverFilterParams,
   type MediaType,
   type TMDBCollectionDetail,
+  type TMDBEpisodeGroupDetail,
+  type TMDBEpisodeGroupSummary,
   type TMDBMediaDetail,
   type TMDBMediaItem,
   type TMDBPaginatedResponse,
@@ -342,6 +344,94 @@ async function sanitizeMediaList(
     ...tagged,
     results: cleanResults,
   };
+}
+
+export interface CuratedEpisodeGroupOption {
+  id: string;
+  label: string;
+  rawName: string;
+  groupCount: number;
+  episodeCount: number;
+  kind: 'arcs' | 'parts';
+}
+
+const NOISY_EPISODE_GROUP_PATTERN =
+  /dvd|blu-?ray|ka[iï]|opening|chinese|simplified|german|french|italian|mediaserver|single season|absolute|only specials|^specials$|filler|broadcast/i;
+const NON_LATIN_SCRIPT_PATTERN = /[\u0400-\u04FF\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF]/;
+const ARC_GROUP_PATTERN = /\b(arcs?|story\s*arcs?|sagas?)\b/i;
+const PARTS_GROUP_PATTERN = /\b(volumes?|parts?|partes?|split|release order|crunchyroll|netflix)\b/i;
+
+export function selectUsefulEpisodeGroups(
+  groups?: TMDBEpisodeGroupSummary[]
+): CuratedEpisodeGroupOption[] {
+  if (!groups || groups.length === 0) return [];
+
+  const valid = groups.filter((g) => {
+    if (!g || !g.id || !g.name) return false;
+    if (g.group_count < 2 || g.group_count > 60 || g.episode_count <= 0) return false;
+    if (NON_LATIN_SCRIPT_PATTERN.test(g.name)) return false;
+    if (NOISY_EPISODE_GROUP_PATTERN.test(g.name)) return false;
+    return true;
+  });
+
+  if (valid.length === 0) return [];
+
+  const arcCandidates = valid
+    .filter((g) => g.type === 5 || ARC_GROUP_PATTERN.test(g.name))
+    .sort((a, b) => {
+      const score = (item: TMDBEpisodeGroupSummary) => {
+        let s = 0;
+        if (/^(story\s*)?arcs?$/i.test(item.name.trim())) s += 100;
+        else if (ARC_GROUP_PATTERN.test(item.name)) s += 60;
+        if (item.type === 5) s += 30;
+        s -= item.name.length * 0.2;
+        return s;
+      };
+      return score(b) - score(a);
+    });
+
+  const bestArc = arcCandidates[0] || null;
+
+  const partCandidates = valid
+    .filter((g) => g.id !== bestArc?.id && PARTS_GROUP_PATTERN.test(g.name))
+    .sort((a, b) => {
+      const score = (item: TMDBEpisodeGroupSummary) => {
+        let s = 0;
+        if (/volume/i.test(item.name)) s += 80;
+        if (/split|part/i.test(item.name)) s += 70;
+        if (/crunchyroll|netflix/i.test(item.name)) s += 40;
+        if (/release order/i.test(item.name)) s += 20;
+        s -= item.name.length * 0.2;
+        return s;
+      };
+      return score(b) - score(a);
+    });
+
+  const bestParts = partCandidates[0] || null;
+
+  const result: CuratedEpisodeGroupOption[] = [];
+  if (bestArc) {
+    result.push({
+      id: bestArc.id,
+      label: 'Arcos',
+      rawName: bestArc.name,
+      groupCount: bestArc.group_count,
+      episodeCount: bestArc.episode_count,
+      kind: 'arcs',
+    });
+  }
+  if (bestParts) {
+    result.push({
+      id: bestParts.id,
+      label: /\bvolume/i.test(bestParts.name) ? 'Volumes' : 'Partes',
+      rawName: bestParts.name,
+      groupCount: bestParts.group_count,
+      episodeCount: bestParts.episode_count,
+      kind: 'parts',
+    });
+  }
+
+  return result;
 }
 
 export const tmdbService = {
@@ -696,10 +786,11 @@ export const tmdbService = {
     };
   },
 
-  // Full TV Details (including credits, videos, recommendations, similar, content_ratings, external_ids)
+  // Full TV Details (including credits, videos, recommendations, similar, content_ratings, external_ids, episode_groups)
   async getTVDetails(seriesId: number): Promise<TMDBMediaDetail> {
     const detail = await fetchTMDB<TMDBMediaDetail>(`tv/${seriesId}`, {
-      append_to_response: 'credits,videos,recommendations,similar,content_ratings,external_ids',
+      append_to_response:
+        'credits,videos,recommendations,similar,content_ratings,external_ids,episode_groups',
     });
 
     if (!detail.videos?.results?.length) {
@@ -759,6 +850,21 @@ export const tmdbService = {
   // Fetch TV Season Episodes
   async getTVSeasonDetails(seriesId: number, seasonNumber: number): Promise<TMDBSeasonDetail> {
     return fetchTMDB<TMDBSeasonDetail>(`tv/${seriesId}/season/${seasonNumber}`);
+  },
+
+  // Fetch TV Episode Group (Arcs / Split Parts / Release Volumes)
+  async getTVEpisodeGroupDetails(groupId: string): Promise<TMDBEpisodeGroupDetail> {
+    const data = await fetchTMDB<TMDBEpisodeGroupDetail>(`tv/episode_group/${groupId}`);
+    return {
+      ...data,
+      groups: [...(data.groups || [])]
+        .filter((g) => Array.isArray(g.episodes) && g.episodes.length > 0)
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+        .map((g) => ({
+          ...g,
+          episodes: [...g.episodes].sort((a, b) => (a.order ?? a.episode_number) - (b.order ?? b.episode_number)),
+        })),
+    };
   },
 
   // Fetch Recommendations for "Porque você assistiu..."

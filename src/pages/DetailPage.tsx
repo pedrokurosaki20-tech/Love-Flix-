@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clapperboard,
   Film,
   Heart,
@@ -13,7 +14,6 @@ import {
   Plus,
   Share2,
   Star,
-  Tv,
 } from 'lucide-react';
 import { ResilientImage } from '../components/ResilientImage';
 import { MediaCarousel } from '../components/MediaCarousel';
@@ -32,10 +32,13 @@ import {
   getStillUrl,
   isCinemaOnlyMovie,
   pickBestTrailer,
+  selectUsefulEpisodeGroups,
   tmdbService,
 } from '../services/tmdb';
 import type {
   TMDBCollectionDetail,
+  TMDBEpisode,
+  TMDBEpisodeGroupDetail,
   TMDBMediaDetail,
   TMDBPersonDetail,
   TMDBSeasonDetail,
@@ -53,6 +56,7 @@ export const MediaDetailPage: React.FC<{
 }> = ({ mediaType, id }) => {
   const {
     navigateToPage,
+    openMediaDetail,
     openPersonDetail,
     openCollectionDetail,
     openWatchModal,
@@ -71,23 +75,56 @@ export const MediaDetailPage: React.FC<{
   } = useUserData();
 
   const [detail, setDetail] = useState<TMDBMediaDetail | null>(null);
+  const [collectionDetail, setCollectionDetail] = useState<TMDBCollectionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [selectedVideo, setSelectedVideo] = useState<TMDBVideo | null>(null);
 
-  // TV Seasons & Episodes State
+  // TV Seasons, Integrated Arcs/Parts & Episodes State
   const [selectedSeasonNumber, setSelectedSeasonNumber] = useState<number>(1);
   const [seasonDetail, setSeasonDetail] = useState<TMDBSeasonDetail | null>(null);
   const [seasonLoading, setSeasonLoading] = useState<boolean>(false);
+  const [seasonMenuOpen, setSeasonMenuOpen] = useState<boolean>(false);
+  const [primaryEpisodeGroup, setPrimaryEpisodeGroup] = useState<TMDBEpisodeGroupDetail | null>(
+    null
+  );
+  const [primaryGroupKind, setPrimaryGroupKind] = useState<'arcs' | 'parts' | null>(null);
+  const [expandedSectionIds, setExpandedSectionIds] = useState<string[]>([]);
   const [isCinemaExclusive, setIsCinemaExclusive] = useState<boolean>(false);
+  const seasonDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  const trackedHistoryEntry = useMemo(
+    () => history.find((h) => h.id === id && h.media_type === mediaType),
+    [history, id, mediaType]
+  );
+
+  // Close season dropdown when tapping outside
+  useEffect(() => {
+    if (!seasonMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (
+        seasonDropdownRef.current &&
+        !seasonDropdownRef.current.contains(e.target as Node)
+      ) {
+        setSeasonMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [seasonMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setDetail(null);
+    setCollectionDetail(null);
     setSeasonDetail(null);
+    setSeasonMenuOpen(false);
+    setPrimaryEpisodeGroup(null);
+    setPrimaryGroupKind(null);
+    setExpandedSectionIds([]);
     setIsCinemaExclusive(false);
 
     (async () => {
@@ -111,10 +148,45 @@ export const MediaDetailPage: React.FC<{
         );
         setSelectedVideo(pickBestTrailer(ytVideos));
 
+        if (mediaType === 'movie' && data.belongs_to_collection?.id) {
+          tmdbService
+            .getCollectionDetails(data.belongs_to_collection.id)
+            .then((col) => {
+              if (!cancelled) setCollectionDetail(col);
+            })
+            .catch(() => {
+              // ignore collection load error
+            });
+        }
+
         if (mediaType === 'tv' && data.seasons && data.seasons.length > 0) {
+          const validTrackedSeason = trackedHistoryEntry?.trackedSeason
+            ? data.seasons.find(
+                (s) => s.season_number === trackedHistoryEntry.trackedSeason && s.episode_count > 0
+              )
+            : undefined;
           const firstRegular =
-            data.seasons.find((s) => s.season_number > 0) || data.seasons[0];
+            validTrackedSeason ||
+            data.seasons.find((s) => s.season_number > 0 && s.episode_count > 0) ||
+            data.seasons[0];
           setSelectedSeasonNumber(firstRegular.season_number);
+
+          // Automatically load best Arcs or Parts structure in background (no mode buttons needed)
+          const groupOpts = selectUsefulEpisodeGroups(data.episode_groups?.results);
+          if (groupOpts.length > 0) {
+            const best = groupOpts[0];
+            tmdbService
+              .getTVEpisodeGroupDetails(best.id)
+              .then((gDetail) => {
+                if (!cancelled) {
+                  setPrimaryEpisodeGroup(gDetail);
+                  setPrimaryGroupKind(best.kind);
+                }
+              })
+              .catch(() => {
+                // silently fallback to standard flat season episodes
+              });
+          }
         }
       } catch (err) {
         if (!cancelled) {
@@ -155,6 +227,115 @@ export const MediaDetailPage: React.FC<{
     };
   }, [mediaType, id, detail, selectedSeasonNumber]);
 
+  // Build unified sections (Arcs / Parts / Episode Blocks) for the currently selected season
+  const seasonSections = useMemo(() => {
+    if (mediaType !== 'tv' || !seasonDetail) return [];
+
+    const rawEpisodes = seasonDetail.episodes || [];
+    const epByNumber = new Map<number, TMDBEpisode>();
+    for (const ep of rawEpisodes) {
+      epByNumber.set(ep.episode_number, ep);
+    }
+
+    if (primaryEpisodeGroup?.groups?.length) {
+      const matched = primaryEpisodeGroup.groups
+        .map((g, idx) => {
+          const seasonEps = g.episodes
+            .filter((ep) => ep.season_number === selectedSeasonNumber)
+            .map((ep) => {
+              const rich = epByNumber.get(ep.episode_number);
+              return rich ? { ...ep, ...rich } : ep;
+            });
+          return { g, idx, seasonEps };
+        })
+        .filter((entry) => entry.seasonEps.length > 0);
+
+      if (matched.length >= 2) {
+        const coveredNums = new Set<number>();
+        const sections = matched.map(({ g, seasonEps }, localIdx) => {
+          for (const ep of seasonEps) coveredNums.add(ep.episode_number);
+          const hasArcPrefix = /^\s*(arco|arc|saga|parte|part|vol\.?|volume)\b/i.test(g.name);
+          const cleanTitle =
+            primaryGroupKind === 'arcs' && !hasArcPrefix
+              ? `Arco ${localIdx + 1} · ${g.name}`
+              : g.name;
+          return {
+            id: g.id,
+            title: cleanTitle,
+            episodes: seasonEps,
+          };
+        });
+
+        const leftover = rawEpisodes.filter((ep) => !coveredNums.has(ep.episode_number));
+        if (leftover.length > 0) {
+          sections.push({
+            id: `extra-${selectedSeasonNumber}`,
+            title: 'Demais episódios',
+            episodes: leftover,
+          });
+        }
+
+        return sections;
+      }
+    }
+
+    // Fallback when season has no arcs/parts in TMDB:
+    // If very long (>30 eps), split cleanly into collapsible blocks of 25
+    if (rawEpisodes.length > 30) {
+      const chunkSize = 25;
+      const chunks: Array<{ id: string; title: string; episodes: TMDBEpisode[] }> = [];
+      for (let i = 0; i < rawEpisodes.length; i += chunkSize) {
+        const slice = rawEpisodes.slice(i, i + chunkSize);
+        const startNum = slice[0]?.episode_number ?? i + 1;
+        const endNum = slice[slice.length - 1]?.episode_number ?? i + slice.length;
+        chunks.push({
+          id: `block-${selectedSeasonNumber}-${i}`,
+          title: `Parte ${chunks.length + 1} · Episódios ${startNum}–${endNum}`,
+          episodes: slice,
+        });
+      }
+      return chunks;
+    }
+
+    return [
+      {
+        id: 'flat-season',
+        title: null as string | null,
+        episodes: rawEpisodes,
+      },
+    ];
+  }, [mediaType, seasonDetail, selectedSeasonNumber, primaryEpisodeGroup, primaryGroupKind]);
+
+  // Automatically pick which arc(s)/part(s) start expanded for the selected season
+  useEffect(() => {
+    if (seasonSections.length === 0) {
+      setExpandedSectionIds([]);
+      return;
+    }
+    if (seasonSections.length === 1) {
+      setExpandedSectionIds([seasonSections[0].id]);
+      return;
+    }
+
+    const totalEps = seasonSections.reduce((acc, s) => acc + s.episodes.length, 0);
+    // Short season with 2-3 clear arcs/parts (e.g., 20 + 12 + 13 eps): keep all visible and organized!
+    if (seasonSections.length <= 3 && totalEps <= 50) {
+      setExpandedSectionIds(seasonSections.map((s) => s.id));
+      return;
+    }
+
+    // Long season with many arcs (e.g. Bleach S1 with 16 arcs): open the tracked arc or Arc 1
+    const trackedSec =
+      trackedHistoryEntry?.trackedSeason === selectedSeasonNumber &&
+      trackedHistoryEntry?.trackedEpisode
+        ? seasonSections.find((sec) =>
+            sec.episodes.some((ep) => ep.episode_number === trackedHistoryEntry.trackedEpisode)
+          )
+        : undefined;
+
+    setExpandedSectionIds([(trackedSec || seasonSections[0]).id]);
+  }, [selectedSeasonNumber, seasonSections]);
+
   const handleShare = async () => {
     if (!detail) return;
     const mediaTitle = getMediaTitle(detail);
@@ -181,11 +362,6 @@ export const MediaDetailPage: React.FC<{
       }
     }
   };
-
-  const trackedHistoryEntry = useMemo(
-    () => history.find((h) => h.id === id && h.media_type === mediaType),
-    [history, id, mediaType]
-  );
 
   if (loading) {
     return (
@@ -287,7 +463,7 @@ export const MediaDetailPage: React.FC<{
       : 'Assistir Agora';
 
   return (
-    <div className="pb-14">
+    <div className="pb-28">
       {/* Top Cinematic Backdrop & Poster Header */}
       <section className="relative w-full overflow-hidden bg-[#080808] border-b border-white/[0.07]">
         <div className="absolute inset-0 h-full">
@@ -687,29 +863,108 @@ export const MediaDetailPage: React.FC<{
       </section>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-10 space-y-12 mt-10">
-        {/* Franchise Banner (if part of a Movie Collection) */}
+        {/* Movie Franchise & Sequels Inline Explorer */}
         {detail.belongs_to_collection && (
-          <div className="rounded-2xl overflow-hidden bg-[#121212] border border-white/10 p-5 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-[#E50914]/15 flex items-center justify-center text-[#FF253A] shrink-0">
-                <Layers className="w-6 h-6" />
+          <section className="rounded-2xl overflow-hidden bg-[#121212] border border-white/10 p-4 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="w-11 h-11 rounded-xl bg-[#E50914]/15 border border-[#E50914]/25 flex items-center justify-center text-[#FF253A] shrink-0">
+                  <Layers className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-[#FF253A]">
+                    Sequência da Franquia
+                    {collectionDetail?.parts?.length
+                      ? ` · ${collectionDetail.parts.length} filmes em ordem`
+                      : ''}
+                  </p>
+                  <h3 className="font-display text-base sm:text-lg font-bold text-white truncate">
+                    {collectionDetail?.name || detail.belongs_to_collection.name}
+                  </h3>
+                </div>
               </div>
-              <div>
-                <p className="text-xs font-semibold text-[#FF253A]">Parte de uma Franquia</p>
-                <h3 className="font-display text-lg font-bold text-white">
-                  {detail.belongs_to_collection.name}
-                </h3>
-              </div>
+
+              <button
+                type="button"
+                onClick={() => openCollectionDetail(detail.belongs_to_collection!.id)}
+                className="px-4 py-2 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white transition-colors cursor-pointer whitespace-nowrap self-start sm:self-auto"
+              >
+                Ver coleção completa
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={() => openCollectionDetail(detail.belongs_to_collection!.id)}
-              className="px-5 py-2.5 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-xs font-bold text-white transition-colors cursor-pointer whitespace-nowrap"
-            >
-              Ver coleção completa
-            </button>
-          </div>
+            {collectionDetail?.parts && collectionDetail.parts.length > 0 && (
+              <div className="flex gap-3 sm:gap-3.5 overflow-x-auto no-scrollbar pb-1 pt-1">
+                {collectionDetail.parts.map((part, idx) => {
+                  const isCurrent = part.id === detail.id;
+                  const partTitle = getMediaTitle(part);
+                  const partYear = getMediaYear(part);
+
+                  return (
+                    <button
+                      key={part.id}
+                      type="button"
+                      onClick={() => {
+                        if (!isCurrent) {
+                          openMediaDetail({ ...part, media_type: 'movie' });
+                        }
+                      }}
+                      className={`group w-28 sm:w-36 shrink-0 text-left rounded-xl transition-all focus-visible:outline-none ${
+                        isCurrent ? 'cursor-default' : 'cursor-pointer'
+                      }`}
+                    >
+                      <div
+                        className={`relative aspect-[2/3] w-full rounded-xl overflow-hidden bg-[#181818] border transition-all ${
+                          isCurrent
+                            ? 'border-[#E50914] ring-2 ring-[#E50914]/40 shadow-lg shadow-[#E50914]/15'
+                            : 'border-white/[0.09] group-hover:border-[#E50914]/70'
+                        }`}
+                      >
+                        <ResilientImage
+                          src={getPosterUrl(part.poster_path, 'w342')}
+                          alt={partTitle}
+                          fallbackType="poster"
+                          className={`w-full h-full transition-transform duration-200 ${
+                            isCurrent ? '' : 'group-hover:scale-105'
+                          }`}
+                        />
+                        <div className="absolute inset-x-0 top-0 p-1.5 flex items-center justify-between gap-1 bg-gradient-to-b from-black/80 via-black/40 to-transparent">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold tracking-tight ${
+                              isCurrent
+                                ? 'bg-[#E50914] text-white'
+                                : 'bg-black/80 text-white/95 border border-white/15'
+                            }`}
+                          >
+                            Parte {idx + 1}
+                          </span>
+                          {partYear && (
+                            <span className="text-[10px] font-semibold text-white/85 tabular-nums bg-black/70 px-1.5 py-0.5 rounded">
+                              {partYear}
+                            </span>
+                          )}
+                        </div>
+                        {isCurrent && (
+                          <span className="absolute bottom-1.5 inset-x-1.5 text-center py-0.5 rounded bg-[#E50914]/95 text-[10px] font-extrabold text-white shadow">
+                            Você está aqui
+                          </span>
+                        )}
+                      </div>
+                      <p
+                        className={`text-xs font-bold line-clamp-2 mt-1.5 leading-snug ${
+                          isCurrent
+                            ? 'text-[#FF253A]'
+                            : 'text-white/90 group-hover:text-white'
+                        }`}
+                      >
+                        {partTitle}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         )}
 
         {/* Embedded Official Trailer Section */}
@@ -758,185 +1013,281 @@ export const MediaDetailPage: React.FC<{
           </section>
         )}
 
-        {/* TV Series / Anime / Dorama Seasons & Episodes Explorer */}
-        {mediaType === 'tv' && regularSeasons.length > 0 && (
-          <section className="space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2 text-[#FF253A] text-xs font-bold mb-1">
-                  <Tv className="w-4 h-4" />
-                  <span>Guia de Episódios</span>
+        {/* TV Series / Anime / Dorama Netflix-Inspired Episodes & Integrated Arcs Explorer */}
+        {mediaType === 'tv' && regularSeasons.length > 0 && (() => {
+          const activeSeasonMeta =
+            regularSeasons.find((s) => s.season_number === selectedSeasonNumber) ||
+            regularSeasons[0];
+
+          const toggleSection = (sectionId: string) => {
+            setExpandedSectionIds((prev) => {
+              const isOpen = prev.includes(sectionId);
+              if (seasonSections.length > 3) {
+                return isOpen ? [] : [sectionId];
+              }
+              return isOpen ? prev.filter((x) => x !== sectionId) : [...prev, sectionId];
+            });
+          };
+
+          const renderEpisodeRow = (ep: TMDBEpisode) => {
+            const isTrackedEp =
+              trackedHistoryEntry?.trackedSeason === ep.season_number &&
+              trackedHistoryEntry?.trackedEpisode === ep.episode_number;
+
+            return (
+              <div
+                key={`${ep.id}-${ep.season_number}-${ep.episode_number}`}
+                onClick={() =>
+                  openWatchModal({
+                    mediaType: 'tv',
+                    id: detail.id,
+                    title,
+                    imdbId: detail.imdb_id || detail.external_ids?.imdb_id || null,
+                    season: ep.season_number,
+                    episode: ep.episode_number,
+                    episodeTitle: ep.name,
+                    item: detail,
+                  })
+                }
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openWatchModal({
+                      mediaType: 'tv',
+                      id: detail.id,
+                      title,
+                      imdbId: detail.imdb_id || detail.external_ids?.imdb_id || null,
+                      season: ep.season_number,
+                      episode: ep.episode_number,
+                      episodeTitle: ep.name,
+                      item: detail,
+                    });
+                  }
+                }}
+                className={`group p-3 sm:p-4 flex flex-row items-center gap-3 sm:gap-4 transition-colors cursor-pointer focus-visible:outline-none focus-visible:bg-white/[0.04] ${
+                  isTrackedEp
+                    ? 'bg-[#E50914]/[0.07] border-l-2 border-l-[#E50914]'
+                    : 'hover:bg-white/[0.03]'
+                }`}
+              >
+                {/* Netflix-Style Clean Thumbnail with Play Circle */}
+                <div className="w-[116px] sm:w-40 aspect-video rounded-lg overflow-hidden bg-[#181818] shrink-0 relative">
+                  <ResilientImage
+                    src={getStillUrl(ep.still_path, 'w500')}
+                    alt={ep.name}
+                    fallbackType="backdrop"
+                    className="w-full h-full group-hover:scale-105 transition-transform duration-200"
+                  />
+                  <div className="absolute inset-0 bg-black/25 group-hover:bg-black/45 transition-colors flex items-center justify-center">
+                    <span className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-black/65 border border-white/75 text-white flex items-center justify-center shadow-lg group-hover:bg-[#E50914] group-hover:border-[#E50914] transition-colors">
+                      <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                    </span>
+                  </div>
                 </div>
-                <h2 className="font-display text-xl sm:text-2xl font-bold text-white">
-                  Temporadas & Episódios
-                </h2>
+
+                {/* Clean Episode Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="text-xs sm:text-sm font-bold text-white line-clamp-1 sm:line-clamp-2 group-hover:text-white/95">
+                        {ep.episode_number}. {ep.name}
+                      </h3>
+                      {(ep.runtime || isTrackedEp) && (
+                        <div className="flex items-center gap-2 text-[11px] text-[#A1A1A1] mt-0.5 tabular-nums">
+                          {ep.runtime ? <span>{ep.runtime} min</span> : null}
+                          {isTrackedEp && (
+                            <span className="text-[#FF253A] font-semibold">· Onde parei</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        recordHistoryVisit(detail, 'continuing', {
+                          season: ep.season_number,
+                          episode: ep.episode_number,
+                          title: ep.name,
+                        });
+                      }}
+                      title={isTrackedEp ? 'Marcado onde parei' : 'Marcar onde parei'}
+                      aria-label={isTrackedEp ? 'Marcado onde parei' : 'Marcar onde parei'}
+                      className={`p-1.5 rounded-lg shrink-0 transition-colors cursor-pointer ${
+                        isTrackedEp
+                          ? 'text-[#FF253A] bg-[#E50914]/15'
+                          : 'text-[#A1A1A1]/70 hover:text-white hover:bg-white/[0.06]'
+                      }`}
+                    >
+                      <Bookmark
+                        className={`w-3.5 h-3.5 ${isTrackedEp ? 'fill-current' : ''}`}
+                      />
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] sm:text-xs text-[#A1A1A1] mt-1 leading-snug line-clamp-2">
+                    {ep.overview || 'Sinopse deste episódio não informada.'}
+                  </p>
+                </div>
               </div>
+            );
+          };
 
-              {trackedHistoryEntry?.trackedSeason && trackedHistoryEntry?.trackedEpisode && (
-                <p className="text-xs font-mono tabular-nums text-[#FF253A]">
-                  Acompanhando: T{trackedHistoryEntry.trackedSeason} · Ep.{' '}
-                  {trackedHistoryEntry.trackedEpisode}
-                </p>
-              )}
-            </div>
+          return (
+            <section className="space-y-4">
+              {/* Simple Netflix-Inspired Header + Single Season Dropdown */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="font-display text-xl sm:text-2xl font-bold text-white">
+                    Episódios
+                  </h2>
+                  {trackedHistoryEntry?.trackedSeason && trackedHistoryEntry?.trackedEpisode && (
+                    <p className="text-[11px] sm:text-xs text-[#FF253A] font-semibold mt-0.5 tabular-nums">
+                      Continuar de T{trackedHistoryEntry.trackedSeason} · Ep.{' '}
+                      {trackedHistoryEntry.trackedEpisode}
+                    </p>
+                  )}
+                </div>
 
-            {/* Season Selector Tabs */}
-            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-              {regularSeasons.map((s) => {
-                const active = s.season_number === selectedSeasonNumber;
-                return (
+                {/* Single Clean Season Selector Dropdown */}
+                <div className="relative shrink-0" ref={seasonDropdownRef}>
                   <button
-                    key={s.id}
                     type="button"
-                    onClick={() => setSelectedSeasonNumber(s.season_number)}
-                    className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                      active
-                        ? 'bg-[#E50914] text-white'
-                        : 'bg-[#141414] hover:bg-[#1e1e1e] text-[#A1A1A1] hover:text-white border border-white/[0.08]'
+                    onClick={() => {
+                      if (regularSeasons.length > 1) {
+                        setSeasonMenuOpen((prev) => !prev);
+                      }
+                    }}
+                    disabled={regularSeasons.length <= 1}
+                    className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#161616] border border-white/15 text-xs sm:text-sm font-bold text-white transition-colors ${
+                      regularSeasons.length > 1
+                        ? 'hover:bg-[#1f1f1f] cursor-pointer'
+                        : 'cursor-default opacity-90'
                     }`}
                   >
-                    {s.name} ({s.episode_count})
+                    <span>{activeSeasonMeta?.name || `Temporada ${selectedSeasonNumber}`}</span>
+                    {regularSeasons.length > 1 && (
+                      <ChevronDown
+                        className={`w-4 h-4 text-[#A1A1A1] transition-transform ${
+                          seasonMenuOpen ? 'rotate-180 text-white' : ''
+                        }`}
+                      />
+                    )}
                   </button>
-                );
-              })}
-            </div>
 
-            {seasonLoading ? (
-              <div className="space-y-3">
-                {Array.from({ length: 4 }).map((_, idx) => (
-                  <div
-                    key={idx}
-                    className="h-28 rounded-2xl bg-[#141414] animate-pulse border border-white/[0.05]"
-                  />
-                ))}
-              </div>
-            ) : seasonDetail ? (
-              <div className="space-y-4">
-                {seasonDetail.overview && (
-                  <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed max-w-3xl">
-                    {seasonDetail.overview}
-                  </p>
-                )}
-
-                <div className="divide-y divide-white/[0.07] rounded-2xl bg-[#121212] border border-white/[0.08] overflow-hidden">
-                  {(seasonDetail.episodes || []).map((ep) => {
-                    const isTrackedEp =
-                      trackedHistoryEntry?.trackedSeason === ep.season_number &&
-                      trackedHistoryEntry?.trackedEpisode === ep.episode_number;
-
-                    return (
-                      <div
-                        key={ep.id}
-                        className="p-4 sm:p-5 flex flex-col sm:flex-row gap-4 hover:bg-white/[0.02] transition-colors"
-                      >
-                        <button
-                          type="button"
-                          onClick={() =>
-                            openWatchModal({
-                              mediaType: 'tv',
-                              id: detail.id,
-                              title,
-                              imdbId: detail.imdb_id || detail.external_ids?.imdb_id || null,
-                              season: ep.season_number,
-                              episode: ep.episode_number,
-                              episodeTitle: ep.name,
-                              item: detail,
-                            })
-                          }
-                          aria-label={`Assistir T${ep.season_number} Ep. ${ep.episode_number}: ${ep.name}`}
-                          className="group w-full sm:w-48 aspect-video rounded-xl overflow-hidden bg-[#181818] shrink-0 relative cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914]"
-                        >
-                          <ResilientImage
-                            src={getStillUrl(ep.still_path, 'w500')}
-                            alt={ep.name}
-                            fallbackType="backdrop"
-                            className="w-full h-full group-hover:scale-105 transition-transform duration-200"
-                          />
-                          <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                            <span className="w-10 h-10 rounded-full bg-[#E50914] text-white flex items-center justify-center shadow-lg">
-                              <Play className="w-4 h-4 fill-current ml-0.5" />
+                  {seasonMenuOpen && regularSeasons.length > 1 && (
+                    <div className="absolute right-0 mt-2 w-60 max-h-72 overflow-y-auto rounded-xl bg-[#161616] border border-white/15 shadow-2xl py-1.5 z-30">
+                      {regularSeasons.map((s) => {
+                        const isActive = s.season_number === selectedSeasonNumber;
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedSeasonNumber(s.season_number);
+                              setSeasonMenuOpen(false);
+                            }}
+                            className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left text-xs sm:text-sm transition-colors cursor-pointer ${
+                              isActive
+                                ? 'bg-[#E50914]/15 text-white font-bold'
+                                : 'text-[#A1A1A1] hover:bg-white/[0.06] hover:text-white font-medium'
+                            }`}
+                          >
+                            <span className="truncate">{s.name}</span>
+                            <span className="text-[11px] text-[#A1A1A1] shrink-0 tabular-nums">
+                              {s.episode_count} eps
                             </span>
-                          </div>
-                          <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded bg-black/80 font-mono text-[11px] font-bold text-white tabular-nums">
-                            Ep. {String(ep.episode_number).padStart(2, '0')}
-                          </span>
-                        </button>
-
-                        <div className="flex-1 min-w-0 flex flex-col justify-between">
-                          <div>
-                            <div className="flex flex-wrap items-start justify-between gap-2">
-                              <h3 className="text-sm sm:text-base font-bold text-white">
-                                {ep.episode_number}. {ep.name}
-                              </h3>
-                              <div className="flex items-center gap-2 text-xs text-[#A1A1A1] tabular-nums shrink-0">
-                                {ep.vote_average > 0 && (
-                                  <span className="inline-flex items-center gap-0.5 text-amber-400 font-semibold">
-                                    <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                                    {ep.vote_average.toFixed(1)}
-                                  </span>
-                                )}
-                                {ep.runtime ? <span>· {ep.runtime} min</span> : null}
-                                {ep.air_date ? (
-                                  <span>· {formatReleaseDate(ep.air_date)}</span>
-                                ) : null}
-                              </div>
-                            </div>
-
-                            <p className="text-xs sm:text-sm text-[#A1A1A1] mt-1.5 leading-relaxed line-clamp-3">
-                              {ep.overview || 'Descrição deste episódio não informada na TMDB.'}
-                            </p>
-                          </div>
-
-                          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                openWatchModal({
-                                  mediaType: 'tv',
-                                  id: detail.id,
-                                  title,
-                                  imdbId: detail.imdb_id || detail.external_ids?.imdb_id || null,
-                                  season: ep.season_number,
-                                  episode: ep.episode_number,
-                                  episodeTitle: ep.name,
-                                  item: detail,
-                                })
-                              }
-                              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#E50914] hover:bg-[#FF253A] text-white text-xs font-bold transition-colors cursor-pointer"
-                            >
-                              <Play className="w-3.5 h-3.5 fill-current" />
-                              <span>Assistir</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                recordHistoryVisit(detail, 'continuing', {
-                                  season: ep.season_number,
-                                  episode: ep.episode_number,
-                                  title: ep.name,
-                                });
-                              }}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                                isTrackedEp
-                                  ? 'bg-white/15 border border-white/30 text-white font-bold'
-                                  : 'bg-[#1a1a1a] hover:bg-[#242424] text-[#A1A1A1] hover:text-white border border-white/10'
-                              }`}
-                            >
-                              {isTrackedEp
-                                ? 'Episódio atual marcado'
-                                : 'Marcar parada neste episódio'}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
-            ) : null}
-          </section>
-        )}
+
+              {seasonLoading ? (
+                <div className="space-y-2.5">
+                  {Array.from({ length: 4 }).map((_, idx) => (
+                    <div
+                      key={idx}
+                      className="h-24 rounded-xl bg-[#141414] animate-pulse border border-white/[0.05]"
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {seasonDetail?.overview && (
+                    <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed max-w-3xl">
+                      {seasonDetail.overview}
+                    </p>
+                  )}
+
+                  {seasonSections.length === 1 && seasonSections[0].title === null ? (
+                    <div className="divide-y divide-white/[0.07] rounded-2xl bg-[#121212] border border-white/[0.08] overflow-hidden">
+                      {seasonSections[0].episodes.map((ep) => renderEpisodeRow(ep))}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {seasonSections.map((sec) => {
+                        const isOpen = expandedSectionIds.includes(sec.id);
+                        const hasTrackedInside = Boolean(
+                          trackedHistoryEntry?.trackedSeason === selectedSeasonNumber &&
+                            trackedHistoryEntry?.trackedEpisode &&
+                            sec.episodes.some(
+                              (ep) => ep.episode_number === trackedHistoryEntry.trackedEpisode
+                            )
+                        );
+
+                        return (
+                          <div
+                            key={sec.id}
+                            className="rounded-2xl bg-[#121212] border border-white/[0.08] overflow-hidden"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => toggleSection(sec.id)}
+                              className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/[0.03] transition-colors cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                {hasTrackedInside && (
+                                  <span
+                                    className="w-2 h-2 rounded-full bg-[#E50914] shrink-0"
+                                    title="Onde você parou"
+                                  />
+                                )}
+                                <span className="text-xs sm:text-sm font-bold text-white truncate">
+                                  {sec.title}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2 shrink-0 text-[11px] sm:text-xs text-[#A1A1A1] tabular-nums">
+                                <span>{sec.episodes.length} eps</span>
+                                <ChevronDown
+                                  className={`w-4 h-4 transition-transform ${
+                                    isOpen ? 'rotate-180 text-white' : ''
+                                  }`}
+                                />
+                              </div>
+                            </button>
+
+                            {isOpen && (
+                              <div className="divide-y divide-white/[0.06] border-t border-white/[0.07]">
+                                {sec.episodes.map((ep) => renderEpisodeRow(ep))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+          );
+        })()}
 
         {/* Elenco Principal */}
         {cast.length > 0 && (
@@ -1152,7 +1503,7 @@ export const CollectionDetailPage: React.FC<{ collectionId: number }> = ({
   }
 
   return (
-    <div className="pb-12">
+    <div className="pb-28">
       <div className="relative py-16 px-4 sm:px-6 lg:px-10 bg-[#101010] border-b border-white/[0.08] overflow-hidden">
         <div className="absolute inset-0">
           <ResilientImage

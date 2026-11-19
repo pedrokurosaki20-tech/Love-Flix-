@@ -15,6 +15,7 @@ import { discoverCuratedDoramas } from './catalogAvailability.js';
 import { renderStatusHtml } from './playerHtml.js';
 import {
   checkTitleChannelAvailability,
+  checkTvSearchAvailability,
   resolveStreamWithFallback,
 } from './supercdnResolver.js';
 import { registerExternalBridgeRoutes } from './externalRoomBridge.js';
@@ -24,6 +25,7 @@ import {
   isMovieExcludedFromPlatform,
 } from './cinemaFilter.js';
 import { registerAccountSecurityRoutes } from './accountSecurity.js';
+import { registerAuthHandoffRoutes } from './authHandoff.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -77,6 +79,7 @@ export function registerApiRoutes(app: Express): void {
       req.url.startsWith('/supercdn/') ||
       req.url.startsWith('/bridge/') ||
       req.url.startsWith('/account/contact-verification/') ||
+      req.url.startsWith('/auth/confirm-handoff/') ||
       req.url === '/health' ||
       req.url.startsWith('/health?')
     ) {
@@ -87,6 +90,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerExternalBridgeRoutes(app);
   registerAccountSecurityRoutes(app);
+  registerAuthHandoffRoutes(app);
 
   app.get('/api/health', (_req: Request, res: Response) => {
     const apiKey = process.env.TMDB_API_KEY || FALLBACK_SERVER_KEY;
@@ -167,24 +171,67 @@ export function registerApiRoutes(app: Express): void {
         : { error: await upstream.text() };
 
       if (upstream.ok) {
+        const isPersonSearch = cleanPath.startsWith('search/person');
+        const isTvSearch = cleanPath.startsWith('search/tv');
+        const isMovieSearch = cleanPath.startsWith('search/movie');
+        const isMultiSearch = cleanPath.startsWith('search/multi');
+
         if (
-          cleanPath.startsWith('search/') ||
-          cleanPath.startsWith('movie/now_playing') ||
-          cleanPath.startsWith('movie/upcoming') ||
-          cleanPath.startsWith('trending/') ||
-          cleanPath.startsWith('discover/movie') ||
-          cleanPath.startsWith('movie/popular') ||
-          cleanPath.startsWith('movie/top_rated')
+          !isPersonSearch &&
+          (cleanPath.startsWith('search/') ||
+            cleanPath.startsWith('movie/now_playing') ||
+            cleanPath.startsWith('movie/upcoming') ||
+            cleanPath.startsWith('trending/') ||
+            cleanPath.startsWith('discover/movie') ||
+            cleanPath.startsWith('movie/popular') ||
+            cleanPath.startsWith('movie/top_rated'))
         ) {
           try {
-            if (payload && typeof payload === 'object' && Array.isArray((payload as Record<string, unknown>).results)) {
-              const resList = (payload as { results: Array<{ id: number; release_date?: string; media_type?: string }> }).results;
-              const exclusionChecks = await Promise.all(
-                resList.map((item) => (item ? isMovieExcludedFromPlatform(item) : Promise.resolve(true)))
+            if (
+              payload &&
+              typeof payload === 'object' &&
+              Array.isArray((payload as Record<string, unknown>).results)
+            ) {
+              const resList = (
+                payload as {
+                  results: Array<{
+                    id: number;
+                    release_date?: string;
+                    first_air_date?: string;
+                    media_type?: string;
+                  }>;
+                }
+              ).results;
+              const today = new Date().toISOString().slice(0, 10);
+
+              const visibilityChecks = await Promise.all(
+                resList.map(async (item) => {
+                  if (!item || !item.id) return false;
+                  const resolvedType =
+                    item.media_type ||
+                    (isTvSearch ? 'tv' : isMovieSearch ? 'movie' : undefined);
+
+                  if (resolvedType === 'person') return true;
+
+                  if (resolvedType === 'tv') {
+                    if (isMultiSearch || isTvSearch || cleanPath.startsWith('trending/all/')) {
+                      if (item.first_air_date && item.first_air_date > today) return false;
+                      return checkTvSearchAvailability(item.id);
+                    }
+                    return true;
+                  }
+
+                  return !(await isMovieExcludedFromPlatform({
+                    id: item.id,
+                    release_date: item.release_date,
+                    media_type: 'movie',
+                  }));
+                })
               );
+
               const filtered: typeof resList = [];
               for (let i = 0; i < resList.length; i++) {
-                if (!exclusionChecks[i]) {
+                if (visibilityChecks[i]) {
                   filtered.push(resList[i]);
                 }
               }
