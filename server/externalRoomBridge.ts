@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { Express, Request, Response, NextFunction } from 'express';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   FALLBACK_SERVER_KEY,
   buildHlsProxyPath,
@@ -293,34 +294,204 @@ function pruneBridgeRooms(): void {
   }
 }
 
+const SUPABASE_ROOMS_TABLE = 'sessao_flix_rooms';
+let cachedRoomDbClient: SupabaseClient | null | undefined;
+let roomDbRetryAfterMs = 0;
+
+function getRoomDbClient(): SupabaseClient | null {
+  if (Date.now() < roomDbRetryAfterMs) return null;
+  if (cachedRoomDbClient !== undefined) return cachedRoomDbClient;
+
+  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  if (!url || !serviceRoleKey) {
+    cachedRoomDbClient = null;
+    return null;
+  }
+
+  cachedRoomDbClient = createClient(url, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  return cachedRoomDbClient;
+}
+
+function sanitizeAvatarSrc(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim().slice(0, 320);
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch {
+    // ignore invalid avatar URL
+  }
+  return undefined;
+}
+
+function buildEmptyBridgeRoom(roomId: string, now = Date.now()): BridgeRoomRecord {
+  return {
+    roomId,
+    media: null,
+    playback: {
+      paused: true,
+      positionSec: 0,
+      playbackRate: 1,
+      action: 'init',
+      seq: 0,
+      eventId: `init-${now}`,
+      actorId: 'system',
+      actorName: 'Sistema',
+      updatedAtMs: now,
+    },
+    webhookUrl: null,
+    externalAppUrl: null,
+    peers: new Map(),
+    chatMessages: [],
+    seenEventIds: new Set(),
+    seq: 0,
+    createdAtMs: now,
+    updatedAtMs: now,
+  };
+}
+
+function serializeRoomForPersistence(room: BridgeRoomRecord) {
+  return {
+    roomId: room.roomId,
+    media: room.media,
+    playback: room.playback,
+    webhookUrl: room.webhookUrl,
+    externalAppUrl: room.externalAppUrl,
+    peers: Array.from(room.peers.values()),
+    chatMessages: (room.chatMessages || []).slice(-60),
+    seenEventIds: Array.from(room.seenEventIds).slice(-200),
+    seq: room.seq,
+    createdAtMs: room.createdAtMs,
+    updatedAtMs: room.updatedAtMs,
+  };
+}
+
+function hydrateRoomFromPersistence(raw: Record<string, unknown>): BridgeRoomRecord | null {
+  const roomId = String(raw.roomId || '').trim();
+  if (!isValidBridgeRoomId(roomId)) return null;
+  const now = Date.now();
+  const base = buildEmptyBridgeRoom(roomId, Number(raw.createdAtMs) || now);
+  base.media = (raw.media as BridgeMediaState | null) || null;
+  if (raw.playback && typeof raw.playback === 'object') {
+    base.playback = raw.playback as BridgePlaybackState;
+  }
+  base.webhookUrl = typeof raw.webhookUrl === 'string' ? raw.webhookUrl : null;
+  base.externalAppUrl = typeof raw.externalAppUrl === 'string' ? raw.externalAppUrl : null;
+  base.seq = Number(raw.seq) || 0;
+  base.updatedAtMs = Number(raw.updatedAtMs) || now;
+
+  if (Array.isArray(raw.peers)) {
+    for (const p of raw.peers) {
+      if (p && typeof p === 'object' && typeof (p as BridgePeerInfo).peerId === 'string') {
+        const peer = p as BridgePeerInfo;
+        if (now - (peer.lastSeenMs || 0) <= 120_000) {
+          base.peers.set(peer.peerId, peer);
+        }
+      }
+    }
+  }
+  if (Array.isArray(raw.chatMessages)) {
+    base.chatMessages = (raw.chatMessages as BridgeChatMessage[]).slice(-60);
+  }
+  if (Array.isArray(raw.seenEventIds)) {
+    for (const id of raw.seenEventIds) {
+      if (typeof id === 'string' && id) base.seenEventIds.add(id);
+    }
+  }
+  return base;
+}
+
+export async function persistBridgeRoom(room: BridgeRoomRecord): Promise<void> {
+  const db = getRoomDbClient();
+  if (!db) return;
+  try {
+    const expiresAt = new Date(Date.now() + ROOM_IDLE_TTL_MS).toISOString();
+    const { error } = await db.from(SUPABASE_ROOMS_TABLE).upsert(
+      {
+        room_id: room.roomId,
+        state: serializeRoomForPersistence(room),
+        updated_at: new Date().toISOString(),
+        expires_at: expiresAt,
+      },
+      { onConflict: 'room_id' }
+    );
+    if (error) {
+      const code = String((error as { code?: string }).code || '');
+      if (code === '42P01' || code === 'PGRST205') {
+        roomDbRetryAfterMs = Date.now() + 5 * 60_000;
+      }
+    }
+  } catch {
+    // non-fatal persistence fallback
+  }
+}
+
+export async function loadBridgeRoom(roomId: string): Promise<BridgeRoomRecord | null> {
+  pruneBridgeRooms();
+  const inMemory = bridgeRoomsStore.get(roomId);
+  const db = getRoomDbClient();
+  if (!db) {
+    return inMemory || null;
+  }
+
+  try {
+    const { data, error } = await db
+      .from(SUPABASE_ROOMS_TABLE)
+      .select('state, expires_at')
+      .eq('room_id', roomId)
+      .maybeSingle();
+
+    if (error) {
+      const code = String((error as { code?: string }).code || '');
+      if (code === '42P01' || code === 'PGRST205') {
+        roomDbRetryAfterMs = Date.now() + 5 * 60_000;
+      }
+      return inMemory || null;
+    }
+
+    if (!data || !data.state) {
+      return inMemory || null;
+    }
+
+    if (data.expires_at && new Date(data.expires_at).getTime() <= Date.now()) {
+      return inMemory || null;
+    }
+
+    const hydrated = hydrateRoomFromPersistence(data.state as Record<string, unknown>);
+    if (!hydrated) return inMemory || null;
+
+    if (!inMemory || hydrated.seq >= inMemory.seq) {
+      if (inMemory) {
+        for (const [pId, p] of inMemory.peers.entries()) {
+          if (!hydrated.peers.has(pId) && Date.now() - p.lastSeenMs <= 90_000) {
+            hydrated.peers.set(pId, p);
+          }
+        }
+      }
+      bridgeRoomsStore.set(roomId, hydrated);
+      return hydrated;
+    }
+
+    return inMemory;
+  } catch {
+    return inMemory || null;
+  }
+}
+
 export function getOrCreateBridgeRoom(roomId: string): BridgeRoomRecord {
   pruneBridgeRooms();
   let room = bridgeRoomsStore.get(roomId);
   if (!room) {
-    const now = Date.now();
-    room = {
-      roomId,
-      media: null,
-      playback: {
-        paused: true,
-        positionSec: 0,
-        playbackRate: 1,
-        action: 'init',
-        seq: 0,
-        eventId: `init-${now}`,
-        actorId: 'system',
-        actorName: 'Sistema',
-        updatedAtMs: now,
-      },
-      webhookUrl: null,
-      externalAppUrl: null,
-      peers: new Map(),
-      chatMessages: [],
-      seenEventIds: new Set(),
-      seq: 0,
-      createdAtMs: now,
-      updatedAtMs: now,
-    };
+    room = buildEmptyBridgeRoom(roomId);
     bridgeRoomsStore.set(roomId, room);
   }
   return room;
@@ -357,15 +528,24 @@ export function serializeBridgeRoom(room: BridgeRoomRecord) {
 
 export function addChatMessageToBridgeRoom(
   room: BridgeRoomRecord,
-  msg: { peerId: string; name: string; text: string }
+  msg: { id?: string; peerId: string; name: string; text: string; createdAtMs?: number }
 ): BridgeChatMessage {
   if (!room.chatMessages) room.chatMessages = [];
+  const requestedId =
+    typeof msg.id === 'string' && /^[a-zA-Z0-9_-]{4,80}$/.test(msg.id.trim())
+      ? msg.id.trim()
+      : '';
+  const existing = requestedId
+    ? room.chatMessages.find((item) => item.id === requestedId)
+    : undefined;
+  if (existing) return existing;
+
   const chatMsg: BridgeChatMessage = {
-    id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    id: requestedId || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     peerId: msg.peerId,
     name: msg.name,
     text: msg.text.slice(0, 500),
-    createdAtMs: Date.now(),
+    createdAtMs: Number(msg.createdAtMs) || Date.now(),
   };
   room.chatMessages.push(chatMsg);
   if (room.chatMessages.length > 80) {
@@ -884,92 +1064,155 @@ export function registerExternalBridgeRoutes(app: Express): void {
     });
   });
 
-  // 2. Connect / Pair Room Session (returns room-scoped session token + authoritative state)
-  app.post('/api/bridge/rooms/:roomId/connect', (req: Request, res: Response) => {
-    const roomId = String(req.params.roomId || '').trim();
-    if (!isValidBridgeRoomId(roomId)) {
-      res.status(400).json({ ok: false, error: 'Código de sala inválido (use 3 a 64 caracteres).' });
-      return;
-    }
-    if (!ensureBridgeRequestAuth(req, res, roomId)) return;
+  // 2. Connect / Create / Join Room Session (returns room-scoped session token + authoritative state)
+  app.post('/api/bridge/rooms/:roomId/connect', async (req: Request, res: Response) => {
+    try {
+      const roomId = String(req.params.roomId || '').trim().toUpperCase();
+      if (!isValidBridgeRoomId(roomId)) {
+        res.status(400).json({ ok: false, error: 'Código de sala inválido (use 3 a 64 caracteres).' });
+        return;
+      }
+      if (!ensureBridgeRequestAuth(req, res, roomId)) return;
 
-    const room = getOrCreateBridgeRoom(roomId);
-    const webhookUrl = sanitizeHttpUrl(req.body?.webhookUrl);
-    const externalAppUrl = sanitizeHttpUrl(req.body?.externalAppUrl || req.body?.returnUrl);
-    if (webhookUrl !== null || req.body?.webhookUrl === '') {
-      room.webhookUrl = webhookUrl;
-    }
-    if (externalAppUrl !== null || req.body?.externalAppUrl === '') {
-      room.externalAppUrl = externalAppUrl;
-    }
+      const rawMode = String(req.body?.mode || 'auto').toLowerCase();
+      const mode: 'create' | 'join' | 'auto' =
+        rawMode === 'create' ? 'create' : rawMode === 'join' ? 'join' : 'auto';
 
-    const peerId = String(req.body?.peerId || '').trim().slice(0, 64);
-    if (peerId) {
-      const now = Date.now();
-      room.peers.set(peerId, {
-        peerId,
-        name: String(req.body?.peerName || 'Sala Conectada').trim().slice(0, 40),
-        source: req.body?.source === 'external' ? 'external' : 'loveflix',
-        joinedAtMs: room.peers.get(peerId)?.joinedAtMs || now,
-        lastSeenMs: now,
+      let room = await loadBridgeRoom(roomId);
+      if (mode === 'join' && !room) {
+        res.status(404).json({
+          ok: false,
+          code: 'ROOM_NOT_FOUND',
+          error: 'Sala não encontrada ou encerrada. Verifique o código.',
+        });
+        return;
+      }
+      if (!room) {
+        room = getOrCreateBridgeRoom(roomId);
+      }
+
+      const webhookUrl = sanitizeHttpUrl(req.body?.webhookUrl);
+      const externalAppUrl = sanitizeHttpUrl(req.body?.externalAppUrl || req.body?.returnUrl);
+      if (webhookUrl !== null || req.body?.webhookUrl === '') {
+        room.webhookUrl = webhookUrl;
+      }
+      if (externalAppUrl !== null || req.body?.externalAppUrl === '') {
+        room.externalAppUrl = externalAppUrl;
+      }
+
+      const peerId = String(req.body?.peerId || '').trim().slice(0, 64);
+      const peerName = String(req.body?.peerName || 'Sala Conectada').trim().slice(0, 40);
+      const avatarSrc = sanitizeAvatarSrc(req.body?.avatarSrc);
+      if (peerId) {
+        const now = Date.now();
+        room.peers.set(peerId, {
+          peerId,
+          name: peerName,
+          avatarSrc,
+          source: req.body?.source === 'external' ? 'external' : 'loveflix',
+          joinedAtMs: room.peers.get(peerId)?.joinedAtMs || now,
+          lastSeenMs: now,
+        });
+      }
+
+      if (
+        (mode === 'create' || (mode === 'auto' && !room.media)) &&
+        req.body?.media &&
+        typeof req.body.media === 'object'
+      ) {
+        const originUrl = resolveRequestOrigin(req);
+        await applyBridgeMediaUpdate({
+          room,
+          originUrl,
+          rawMedia: req.body.media as Record<string, unknown>,
+          actorId: peerId || 'loveflix-host',
+          actorName: peerName,
+          eventId: typeof req.body?.eventId === 'string' ? req.body.eventId : undefined,
+        });
+      }
+
+      if (mode === 'create' && typeof req.body?.initialMessage === 'string' && req.body.initialMessage.trim()) {
+        addChatMessageToBridgeRoom(room, {
+          id: typeof req.body?.initialMessageId === 'string' ? req.body.initialMessageId : undefined,
+          peerId: peerId || 'loveflix-host',
+          name: peerName,
+          text: req.body.initialMessage.trim(),
+        });
+        room.seq += 1;
+      }
+
+      room.updatedAtMs = Date.now();
+      await persistBridgeRoom(room);
+      const sessionToken = createRoomSessionToken(roomId);
+
+      res.json({
+        ok: true,
+        sessionToken,
+        room: serializeBridgeRoom(room),
       });
+    } catch {
+      res.status(500).json({ ok: false, error: 'Falha ao conectar à sala.' });
     }
-
-    room.updatedAtMs = Date.now();
-    const sessionToken = createRoomSessionToken(roomId);
-
-    res.json({
-      ok: true,
-      sessionToken,
-      room: serializeBridgeRoom(room),
-    });
   });
 
   // 3. Read Authoritative Room State (supports ?sinceSeq=N for lightweight delta checks)
-  app.get('/api/bridge/rooms/:roomId', (req: Request, res: Response) => {
-    const roomId = String(req.params.roomId || '').trim();
-    if (!isValidBridgeRoomId(roomId)) {
-      res.status(400).json({ ok: false, error: 'Código de sala inválido.' });
-      return;
-    }
-    if (!ensureBridgeRequestAuth(req, res, roomId)) return;
-
-    const room = getOrCreateBridgeRoom(roomId);
-    const peerId = String(req.query.peerId || '').trim().slice(0, 64);
-    if (peerId && room.peers.has(peerId)) {
-      const p = room.peers.get(peerId);
-      if (p) p.lastSeenMs = Date.now();
-    }
-
-    const sinceSeq = Number(req.query.sinceSeq);
-    if (Number.isFinite(sinceSeq) && sinceSeq === room.seq) {
-      res.json({
-        ok: true,
-        unchanged: true,
-        seq: room.seq,
-        serverNowMs: Date.now(),
-      });
-      return;
-    }
-
-    res.json({
-      ok: true,
-      unchanged: false,
-      room: serializeBridgeRoom(room),
-    });
-  });
-
-  // 4. Update Synced Content (Movie, Series, Anime, Dorama, Documentary, Season, Episode, Channel)
-  app.post('/api/bridge/rooms/:roomId/media', async (req: Request, res: Response) => {
+  app.get('/api/bridge/rooms/:roomId', async (req: Request, res: Response) => {
     try {
-      const roomId = String(req.params.roomId || '').trim();
+      const roomId = String(req.params.roomId || '').trim().toUpperCase();
       if (!isValidBridgeRoomId(roomId)) {
         res.status(400).json({ ok: false, error: 'Código de sala inválido.' });
         return;
       }
       if (!ensureBridgeRequestAuth(req, res, roomId)) return;
 
-      const room = getOrCreateBridgeRoom(roomId);
+      const room = await loadBridgeRoom(roomId);
+      if (!room) {
+        res.status(404).json({
+          ok: false,
+          code: 'ROOM_NOT_FOUND',
+          error: 'Sala não encontrada ou encerrada.',
+        });
+        return;
+      }
+
+      const peerId = String(req.query.peerId || '').trim().slice(0, 64);
+      if (peerId && room.peers.has(peerId)) {
+        const p = room.peers.get(peerId);
+        if (p) p.lastSeenMs = Date.now();
+      }
+
+      const sinceSeq = Number(req.query.sinceSeq);
+      if (Number.isFinite(sinceSeq) && sinceSeq === room.seq) {
+        res.json({
+          ok: true,
+          unchanged: true,
+          seq: room.seq,
+          serverNowMs: Date.now(),
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        unchanged: false,
+        room: serializeBridgeRoom(room),
+      });
+    } catch {
+      res.status(500).json({ ok: false, error: 'Falha ao consultar estado da sala.' });
+    }
+  });
+
+  // 4. Update Synced Content (Movie, Series, Anime, Dorama, Documentary, Season, Episode, Channel)
+  app.post('/api/bridge/rooms/:roomId/media', async (req: Request, res: Response) => {
+    try {
+      const roomId = String(req.params.roomId || '').trim().toUpperCase();
+      if (!isValidBridgeRoomId(roomId)) {
+        res.status(400).json({ ok: false, error: 'Código de sala inválido.' });
+        return;
+      }
+      if (!ensureBridgeRequestAuth(req, res, roomId)) return;
+
+      const room = (await loadBridgeRoom(roomId)) || getOrCreateBridgeRoom(roomId);
       const rawMedia =
         req.body?.media && typeof req.body.media === 'object'
           ? (req.body.media as Record<string, unknown>)
@@ -996,6 +1239,7 @@ export function registerExternalBridgeRoutes(app: Express): void {
         return;
       }
 
+      await persistBridgeRoom(room);
       res.json({
         ok: true,
         room: serializeBridgeRoom(room),
@@ -1006,37 +1250,98 @@ export function registerExternalBridgeRoutes(app: Express): void {
   });
 
   // 5. Update Synced Playback (play, pause, seek / adiantar / retroceder, playbackRate)
-  app.post('/api/bridge/rooms/:roomId/playback', (req: Request, res: Response) => {
-    const roomId = String(req.params.roomId || '').trim();
-    if (!isValidBridgeRoomId(roomId)) {
-      res.status(400).json({ ok: false, error: 'Código de sala inválido.' });
-      return;
+  app.post('/api/bridge/rooms/:roomId/playback', async (req: Request, res: Response) => {
+    try {
+      const roomId = String(req.params.roomId || '').trim().toUpperCase();
+      if (!isValidBridgeRoomId(roomId)) {
+        res.status(400).json({ ok: false, error: 'Código de sala inválido.' });
+        return;
+      }
+      if (!ensureBridgeRequestAuth(req, res, roomId)) return;
+
+      const room = (await loadBridgeRoom(roomId)) || getOrCreateBridgeRoom(roomId);
+      const rawPlayback =
+        req.body?.playback && typeof req.body.playback === 'object'
+          ? (req.body.playback as Record<string, unknown>)
+          : (req.body as Record<string, unknown>);
+
+      const actorId = String(req.body?.actorId || rawPlayback.actorId || 'peer').slice(0, 64);
+      const actorName = String(req.body?.actorName || rawPlayback.actorName || 'Participante').slice(
+        0,
+        40
+      );
+
+      applyBridgePlaybackUpdate({
+        room,
+        rawPlayback,
+        actorId,
+        actorName,
+      });
+
+      await persistBridgeRoom(room);
+      res.json({
+        ok: true,
+        room: serializeBridgeRoom(room),
+      });
+    } catch {
+      res.status(500).json({ ok: false, error: 'Falha ao sincronizar reprodução da sala.' });
     }
-    if (!ensureBridgeRequestAuth(req, res, roomId)) return;
+  });
 
-    const room = getOrCreateBridgeRoom(roomId);
-    const rawPlayback =
-      req.body?.playback && typeof req.body.playback === 'object'
-        ? (req.body.playback as Record<string, unknown>)
-        : (req.body as Record<string, unknown>);
+  // 5b. Send Chat Message via HTTP (reliable fallback when WebSocket is unavailable)
+  app.post('/api/bridge/rooms/:roomId/chat', async (req: Request, res: Response) => {
+    try {
+      const roomId = String(req.params.roomId || '').trim().toUpperCase();
+      if (!isValidBridgeRoomId(roomId)) {
+        res.status(400).json({ ok: false, error: 'Código de sala inválido.' });
+        return;
+      }
+      if (!ensureBridgeRequestAuth(req, res, roomId)) return;
 
-    const actorId = String(req.body?.actorId || rawPlayback.actorId || 'peer').slice(0, 64);
-    const actorName = String(req.body?.actorName || rawPlayback.actorName || 'Participante').slice(
-      0,
-      40
-    );
+      const text = String(req.body?.text || '').trim();
+      if (!text) {
+        res.status(400).json({ ok: false, error: 'Mensagem vazia.' });
+        return;
+      }
 
-    applyBridgePlaybackUpdate({
-      room,
-      rawPlayback,
-      actorId,
-      actorName,
-    });
+      const room = await loadBridgeRoom(roomId);
+      if (!room) {
+        res.status(404).json({ ok: false, code: 'ROOM_NOT_FOUND', error: 'Sala não encontrada.' });
+        return;
+      }
 
-    res.json({
-      ok: true,
-      room: serializeBridgeRoom(room),
-    });
+      const peerId = String(req.body?.peerId || 'peer').trim().slice(0, 64);
+      const peerName = String(req.body?.peerName || 'Participante').trim().slice(0, 40);
+      const chatMsg = addChatMessageToBridgeRoom(room, {
+        id: typeof req.body?.id === 'string' ? req.body.id : undefined,
+        peerId,
+        name: peerName,
+        text,
+        createdAtMs: Number(req.body?.createdAtMs) || Date.now(),
+      });
+      room.seq += 1;
+      room.updatedAtMs = chatMsg.createdAtMs;
+
+      notifyBridgeRealtimePeers(
+        room.roomId,
+        {
+          type: 'chat:message',
+          roomId: room.roomId,
+          message: chatMsg,
+          seq: room.seq,
+        },
+        peerId
+      );
+
+      await persistBridgeRoom(room);
+      res.json({
+        ok: true,
+        message: chatMsg,
+        room: serializeBridgeRoom(room),
+      });
+    } catch {
+      res.status(500).json({ ok: false, error: 'Falha ao enviar mensagem para a sala.' });
+    }
   });
 
   // 6. Direct Stream Resolver for External Room Player (Movies, Series, Animes, Doramas, Docs)

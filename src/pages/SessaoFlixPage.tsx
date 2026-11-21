@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Check,
@@ -9,30 +9,39 @@ import {
   LogOut,
   Play,
   Radio,
+  RefreshCw,
   Search,
   Send,
   UserRound,
-  Users,
   X,
+  Users,
 } from 'lucide-react';
 import { useExternalRoom } from '../context/ExternalRoomContext';
 import { useNavigation } from '../context/NavigationContext';
 import { useUserData } from '../context/UserDataContext';
+import type { ExternalPlaybackAction } from '../types/externalRoom';
 import {
   tmdbService,
   getMediaTitle,
   getPosterUrl,
-  getBackdropUrl,
-  isCinemaOnlyMovie,
 } from '../services/tmdb';
-import type { TMDBMediaItem, TMDBMediaDetail, TMDBSeasonDetail, TMDBEpisode } from '../types/tmdb';
+import type { TMDBMediaItem, TMDBMediaDetail, TMDBEpisode } from '../types/tmdb';
 import { LOVEFLIX_PRESET_AVATARS } from '../utils/avatars';
 
 const CHANNELS: Array<{ id: 1 | 2 | 3; label: string; desc: string }> = [
-  { id: 1, label: 'Canal 1', desc: 'Embed Primário' },
+  { id: 1, label: 'Canal 1', desc: 'Sync Automático HD' },
   { id: 2, label: 'Canal 2', desc: 'SuperFlix HD' },
   { id: 3, label: 'Canal 3', desc: 'StreamBetter Rápido' },
 ];
+
+function generateRoomCode(): string {
+  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  let randomPart = '';
+  for (let i = 0; i < 4; i++) {
+    randomPart += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `FLIX-${randomPart}`;
+}
 
 function buildSessionWelcomeMessage(roomId: string): string {
   return `🎬 Sua sessão está pronta!
@@ -50,9 +59,17 @@ function isSessionWelcomeMessage(text: string): boolean {
 export const SessaoFlixPage: React.FC = () => {
   const { route } = useNavigation();
   const { profile, pushToast } = useUserData();
+  const preferredAudio: 'pt' | 'original' = profile.audioLanguage === 'original' ? 'original' : 'pt';
+  const preferredSubtitles: 'auto' | 'always' | 'off' =
+    profile.subtitlePreference === 'always' || profile.subtitlePreference === 'off'
+      ? profile.subtitlePreference
+      : 'auto';
+  const preferredQuality: 'auto' | '1080p' | '720p' | 'saver' = profile.playbackQuality || 'auto';
   const {
+    peerId,
     isConnected,
     connecting,
+    lastConnectionError,
     roomId,
     syncedMedia,
     syncedPlayback,
@@ -62,6 +79,9 @@ export const SessaoFlixPage: React.FC = () => {
     connectExternalRoom,
     disconnectExternalRoom,
     syncMediaToExternalRoom,
+    syncPlaybackToExternalRoom,
+    getLiveRoomPositionSec,
+    subscribeRemotePlayback,
     sendChatMessage,
   } = useExternalRoom();
 
@@ -74,6 +94,7 @@ export const SessaoFlixPage: React.FC = () => {
 
   // Input states
   const [inputRoomCode, setInputRoomCode] = useState('');
+  const [joinError, setJoinError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -88,7 +109,9 @@ export const SessaoFlixPage: React.FC = () => {
 
   // Selected media & channel picker modal state before entering the room
   const [selectedItem, setSelectedItem] = useState<TMDBMediaItem | null>(null);
-  const [selectedChannel, setSelectedChannel] = useState<1 | 2 | 3>(2);
+  const [selectedChannel, setSelectedChannel] = useState<1 | 2 | 3>(1);
+  const [availablePickerChannels, setAvailablePickerChannels] = useState<Array<1 | 2 | 3>>([1, 2, 3]);
+  const [checkingChannels, setCheckingChannels] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
   const [selectedEpisode, setSelectedEpisode] = useState<number>(1);
   const [tvDetail, setTvDetail] = useState<TMDBMediaDetail | null>(null);
@@ -97,11 +120,16 @@ export const SessaoFlixPage: React.FC = () => {
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
 
   // Player state inside the room
-  const [currentChannel, setCurrentChannel] = useState<1 | 2 | 3>(2);
+  const [currentChannel, setCurrentChannel] = useState<1 | 2 | 3>(1);
   const [iframeLoading, setIframeLoading] = useState(true);
   const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
+  const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const suppressOutgoingSyncUntilRef = useRef<number>(0);
+  const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptedAutoRoomRef = useRef<string | null>(null);
 
   // Keep player channel in sync with room state
   useEffect(() => {
@@ -110,16 +138,27 @@ export const SessaoFlixPage: React.FC = () => {
     }
   }, [syncedMedia?.channel]);
 
-  // Auto-connect if arrived via ?sala=... or route query
+  // Auto-connect if arrived via ?sala=... or route query (one attempt per code)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const targetRoom = route.query || params.get('sala') || params.get('room');
-    if (targetRoom && targetRoom.trim() && !isConnected && !connecting) {
-      void connectExternalRoom({
-        roomId: targetRoom.trim().toUpperCase(),
-        userName: profile?.name || 'Love Flix',
-      });
-    }
+    const targetRoom = (route.query || params.get('sala') || params.get('room') || '')
+      .trim()
+      .toUpperCase();
+    if (!targetRoom || isConnected || connecting) return;
+    if (attemptedAutoRoomRef.current === targetRoom) return;
+    attemptedAutoRoomRef.current = targetRoom;
+
+    void connectExternalRoom({
+      roomId: targetRoom,
+      mode: 'join',
+      userName: profile?.name || 'Love Flix',
+    }).then((ok) => {
+      if (!ok) {
+        setFlowState('join');
+        setInputRoomCode(targetRoom);
+        setJoinError('Sala não encontrada ou encerrada. Confira o código.');
+      }
+    });
   }, [route.query, isConnected, connecting, connectExternalRoom, profile?.name]);
 
   // Load popular suggestions when entering search flow
@@ -231,6 +270,44 @@ export const SessaoFlixPage: React.FC = () => {
     };
   }, [selectedItem, selectedSeason]);
 
+  // Verify real channel availability whenever selected title / season / episode changes
+  useEffect(() => {
+    if (flowState !== 'channel_select' || !selectedItem) return;
+    let cancelled = false;
+    const isTv = selectedItem.media_type === 'tv';
+    setCheckingChannels(true);
+
+    tmdbService
+      .getChannelAvailability({
+        mediaType: isTv ? 'tv' : 'movie',
+        id: selectedItem.id,
+        season: isTv ? selectedSeason : undefined,
+        episode: isTv ? selectedEpisode : undefined,
+      })
+      .then((res) => {
+        if (cancelled) return;
+        const available = res.availableChannels || [];
+        setAvailablePickerChannels(available);
+        if (available.length > 0) {
+          setSelectedChannel((prev) =>
+            available.includes(prev) ? prev : res.recommendedChannel || available[0]
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAvailablePickerChannels([1, 2, 3]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingChannels(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [flowState, selectedItem, selectedSeason, selectedEpisode]);
+
   // Auto-scroll chat feed
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -238,7 +315,7 @@ export const SessaoFlixPage: React.FC = () => {
     }
   }, [chatMessages]);
 
-  // Handle joining room
+  // Handle joining existing room (strict validation: fails if room does not exist)
   const handleJoinExistingRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     let clean = inputRoomCode.trim();
@@ -257,22 +334,30 @@ export const SessaoFlixPage: React.FC = () => {
 
     clean = clean.replace(/[^a-zA-Z0-9_-]/g, '').toUpperCase();
     if (clean.length < 3) {
+      setJoinError('Código de sala inválido.');
       pushToast('Código de sala inválido.');
       return;
     }
 
+    setJoinError(null);
     setIsSubmitting(true);
     try {
       const ok = await connectExternalRoom({
         roomId: clean,
+        mode: 'join',
         userName: profile?.name || 'Love Flix',
       });
       if (ok) {
         pushToast(`Conectado à Sessão ${clean}!`, 'accent');
         setInputRoomCode('');
+        setJoinError(null);
         setFlowState('initial');
       } else {
-        pushToast('Falha ao conectar à sala. Verifique o código.');
+        const errText =
+          lastConnectionError ||
+          'Sala não encontrada ou encerrada. Confira o código com quem abriu a sala.';
+        setJoinError(errText);
+        pushToast(errText);
       }
     } finally {
       setIsSubmitting(false);
@@ -282,50 +367,56 @@ export const SessaoFlixPage: React.FC = () => {
   // User clicked a title in the search flow
   const handlePickMediaForChannelSelection = (item: TMDBMediaItem) => {
     setSelectedItem(item);
-    setSelectedChannel(2);
+    setSelectedChannel(1);
+    setAvailablePickerChannels([1, 2, 3]);
     setSelectedSeason(1);
     setSelectedEpisode(1);
     setFlowState('channel_select');
   };
 
-  // Final step: Confirm channel and launch the room
+  // Final step: Confirm channel and atomically create the room with selected media + welcome message
   const handleConfirmAndOpenRoom = async () => {
     if (!selectedItem) {
       pushToast('Selecione um filme ou série antes de abrir a sala.');
       return;
     }
+    if (availablePickerChannels.length === 0) {
+      pushToast('Nenhum canal disponível para este título no momento.');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      // 1. Create a new room code
-      const newRoomId = await createRoom();
-      if (!newRoomId) {
-        pushToast('Não foi possível abrir a sala.');
-        return;
-      }
-
+      const code = generateRoomCode();
       const mediaType = selectedItem.media_type === 'tv' ? 'tv' : 'movie';
       const title = getMediaTitle(selectedItem);
+      const selectedEpisodeObj =
+        mediaType === 'tv'
+          ? seasonEpisodes.find((ep) => ep.episode_number === selectedEpisode)
+          : undefined;
 
-      // 2. Put the selected movie/series directly into the created room
-      const synced = await syncMediaToExternalRoom({
-        mediaType,
-        tmdbId: selectedItem.id,
-        title,
-        posterPath: selectedItem.poster_path || null,
-        backdropPath: selectedItem.backdrop_path || null,
-        season: mediaType === 'tv' ? selectedSeason : undefined,
-        episode: mediaType === 'tv' ? selectedEpisode : undefined,
-        channel: selectedChannel,
+      const createdRoomId = await createRoom({
+        customId: code,
+        initialMedia: {
+          mediaType,
+          tmdbId: selectedItem.id,
+          title,
+          posterPath: selectedItem.poster_path || null,
+          backdropPath: selectedItem.backdrop_path || null,
+          season: mediaType === 'tv' ? selectedSeason : undefined,
+          episode: mediaType === 'tv' ? selectedEpisode : undefined,
+          episodeTitle: selectedEpisodeObj?.name || undefined,
+          channel: selectedChannel,
+        },
+        initialWelcomeMessage: buildSessionWelcomeMessage(code),
       });
 
-      if (!synced) {
-        pushToast('Não foi possível carregar o conteúdo na sala.');
-        disconnectExternalRoom();
+      if (!createdRoomId) {
+        pushToast('Não foi possível abrir a sala. Tente novamente.');
         return;
       }
 
-      sendChatMessage(buildSessionWelcomeMessage(newRoomId));
-      pushToast(`Sala ${newRoomId} aberta com sucesso!`, 'accent');
+      pushToast(`Sala ${createdRoomId} aberta com sucesso!`, 'accent');
       setFlowState('initial');
       setSelectedItem(null);
       setSearchQuery('');
@@ -354,7 +445,144 @@ export const SessaoFlixPage: React.FC = () => {
     setChatInput('');
   };
 
-  // Compute stream URL for iframe
+  // Switch channel inside active watch room (broadcasts to room)
+  const handleSwitchRoomChannel = useCallback(
+    async (nextChannel: 1 | 2 | 3) => {
+      if (!syncedMedia || nextChannel === currentChannel) return;
+      setCurrentChannel(nextChannel);
+      await syncMediaToExternalRoom({
+        mediaType: syncedMedia.mediaType,
+        tmdbId: syncedMedia.tmdbId,
+        imdbId: syncedMedia.imdbId,
+        title: syncedMedia.title,
+        posterPath: syncedMedia.posterPath,
+        backdropPath: syncedMedia.backdropPath,
+        season: syncedMedia.season,
+        episode: syncedMedia.episode,
+        episodeTitle: syncedMedia.episodeTitle,
+        channel: nextChannel,
+      });
+    },
+    [currentChannel, syncMediaToExternalRoom, syncedMedia]
+  );
+
+  // Manual resync with room live timestamp
+  const handleManualResync = useCallback(() => {
+    if (!syncedPlayback || !iframeRef.current?.contentWindow) return;
+    const liveSec = getLiveRoomPositionSec(syncedPlayback);
+    suppressOutgoingSyncUntilRef.current = Date.now() + 900;
+    iframeRef.current.contentWindow.postMessage(
+      {
+        type: 'LOVEFLIX_PLAYER_COMMAND',
+        command: 'sync',
+        positionSec: liveSec,
+        paused: syncedPlayback.paused,
+        playbackRate: syncedPlayback.playbackRate || 1,
+      },
+      '*'
+    );
+    const mins = Math.floor(liveSec / 60);
+    const secs = String(Math.floor(liveSec % 60)).padStart(2, '0');
+    pushToast(`Sincronizado com a sala em ${mins}:${secs}`, 'accent');
+  }, [getLiveRoomPositionSec, pushToast, syncedPlayback]);
+
+  // Listen for player iframe events (READY -> auto-seek to live room time, EVENT -> push play/pause/seek)
+  useEffect(() => {
+    if (!isConnected || !syncedMedia) return;
+
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (!d || typeof d !== 'object') return;
+
+      if (d.type === 'LOVEFLIX_PLAYER_READY' && iframeRef.current?.contentWindow) {
+        if (syncedPlayback) {
+          const liveSec = getLiveRoomPositionSec(syncedPlayback);
+          if (liveSec > 1.2 || syncedPlayback.paused) {
+            suppressOutgoingSyncUntilRef.current = Date.now() + 900;
+            iframeRef.current.contentWindow.postMessage(
+              {
+                type: 'LOVEFLIX_PLAYER_COMMAND',
+                command: 'sync',
+                positionSec: liveSec,
+                paused: syncedPlayback.paused,
+                playbackRate: syncedPlayback.playbackRate || 1,
+              },
+              '*'
+            );
+          }
+        }
+        return;
+      }
+
+      if (d.type === 'LOVEFLIX_PLAYER_EVENT') {
+        if (Date.now() < suppressOutgoingSyncUntilRef.current) return;
+        const action = String(d.action || '') as ExternalPlaybackAction;
+        if (action === 'play' || action === 'pause' || action === 'seek' || action === 'ratechange') {
+          syncPlaybackToExternalRoom({
+            action,
+            positionSec: Number(d.positionSec) || 0,
+            paused: Boolean(d.paused),
+            playbackRate: Number(d.playbackRate) || 1,
+          });
+        }
+      }
+    };
+
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [
+    getLiveRoomPositionSec,
+    isConnected,
+    syncPlaybackToExternalRoom,
+    syncedMedia,
+    syncedPlayback,
+  ]);
+
+  // Subscribe to remote playback commands (play, pause, seek) from other participants
+  useEffect(() => {
+    if (!isConnected) return;
+
+    return subscribeRemotePlayback((playback, liveSec) => {
+      if (iframeRef.current?.contentWindow) {
+        suppressOutgoingSyncUntilRef.current = Date.now() + 900;
+        const command =
+          playback.action === 'seek' ? 'seek' : playback.paused ? 'pause' : 'play';
+        iframeRef.current.contentWindow.postMessage(
+          {
+            type: 'LOVEFLIX_PLAYER_COMMAND',
+            command,
+            positionSec: liveSec,
+            paused: playback.paused,
+            playbackRate: playback.playbackRate || 1,
+          },
+          '*'
+        );
+      }
+
+      const mins = Math.floor(liveSec / 60);
+      const secs = String(Math.floor(liveSec % 60)).padStart(2, '0');
+      const stamp = `${mins}:${secs}`;
+      const actor = playback.actorName || 'Sala';
+      const label =
+        playback.action === 'pause'
+          ? `${actor} pausou em ${stamp}`
+          : playback.action === 'seek'
+          ? `${actor} sincronizou para ${stamp}`
+          : playback.action === 'play'
+          ? `${actor} deu play em ${stamp}`
+          : null;
+
+      if (label) {
+        setRemoteSyncNotice(label);
+        if (remoteNoticeTimerRef.current) clearTimeout(remoteNoticeTimerRef.current);
+        remoteNoticeTimerRef.current = setTimeout(() => {
+          setRemoteSyncNotice(null);
+        }, 2600);
+      }
+    });
+  }, [isConnected, subscribeRemotePlayback]);
+
+  // Compute stream URL for iframe (propagating user audio/subtitle/quality preferences)
   const streamSrc = useMemo(() => {
     if (!syncedMedia) return null;
     const superCdnType = syncedMedia.mediaType === 'tv' ? 'tvshow' : 'movie';
@@ -363,17 +591,31 @@ export const SessaoFlixPage: React.FC = () => {
       imdb: syncedMedia.imdbId || '',
       tmdbId: String(syncedMedia.tmdbId),
       channel: String(currentChannel),
+      audioPref: preferredAudio,
+      subPref: preferredSubtitles,
+      qualityPref: preferredQuality,
     });
     if (superCdnType === 'tvshow') {
       streamParams.set('season', String(syncedMedia.season || 1));
       streamParams.set('episode', String(syncedMedia.episode || 1));
     }
     return `/api/supercdn/stream?${streamParams.toString()}`;
-  }, [syncedMedia, currentChannel]);
+  }, [
+    syncedMedia,
+    currentChannel,
+    preferredAudio,
+    preferredSubtitles,
+    preferredQuality,
+  ]);
 
   useEffect(() => {
     setIframeLoading(true);
   }, [streamSrc]);
+
+  const roomAvailableChannels = useMemo<Array<1 | 2 | 3>>(() => {
+    const chs = syncedMedia?.stream?.availableChannels;
+    return Array.isArray(chs) && chs.length > 0 ? chs : [1, 2, 3];
+  }, [syncedMedia?.stream?.availableChannels]);
 
   // =========================================================================
   // VIEW A: DEDICATED WATCH ROOM
@@ -383,36 +625,103 @@ export const SessaoFlixPage: React.FC = () => {
       <div className="fixed inset-0 z-[100] flex h-[100dvh] w-full flex-col overflow-hidden bg-[#050505] text-white">
         <main className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
           <section className="relative min-h-0 flex-1 bg-black">
-            <div className="absolute left-3 right-3 top-3 z-20 flex items-center justify-between gap-3 sm:left-5 sm:right-5 sm:top-5">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsParticipantsOpen(false);
-                  disconnectExternalRoom();
-                }}
-                className="inline-flex h-10 items-center gap-2 rounded-full border border-white/15 bg-black/60 px-4 text-sm font-bold text-white backdrop-blur-md transition-colors hover:bg-[#E50914] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
-                title="Sair da sala"
-              >
-                <LogOut className="h-4 w-4" />
-                <span>Sair</span>
-              </button>
+            <div className="absolute left-3 right-3 top-3 z-20 flex flex-wrap items-center justify-between gap-2 sm:left-5 sm:right-5 sm:top-4">
+              <div className="flex items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsParticipantsOpen(false);
+                    disconnectExternalRoom();
+                  }}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-black/70 px-3.5 text-xs font-bold text-white backdrop-blur-md transition-colors hover:bg-[#E50914] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
+                  title="Sair da sala"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>Sair</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setIsParticipantsOpen(true)}
-                aria-label="Abrir participantes"
-                aria-expanded={isParticipantsOpen}
-                className="relative flex h-10 w-12 items-center justify-center rounded-full border border-white/15 bg-black/60 text-[#FF6470] backdrop-blur-md transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
-                title="Participantes"
-              >
-                <UserRound className="absolute left-[10px] top-[11px] h-4 w-4 fill-[#E50914]/25" />
-                <UserRound className="absolute right-[9px] top-[13px] h-3.5 w-3.5 fill-[#FF6470]/25" />
-              </button>
+                <button
+                  type="button"
+                  onClick={handleCopyRoomId}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-black/70 px-3 text-xs font-mono font-bold text-white backdrop-blur-md transition-colors hover:border-[#E50914]/60"
+                  title="Copiar código da sala"
+                >
+                  <span className="text-[#FF7A83]">#{roomId}</span>
+                  {copiedLink ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5 text-white/70" />
+                  )}
+                </button>
+
+                {syncedMedia && (
+                  <div className="hidden sm:flex h-9 max-w-[260px] items-center rounded-full border border-white/10 bg-black/65 px-3 text-xs font-semibold text-white/90 backdrop-blur-md">
+                    <span className="truncate">
+                      {syncedMedia.title}
+                      {syncedMedia.mediaType === 'tv' && syncedMedia.season && syncedMedia.episode
+                        ? ` · T${syncedMedia.season}:E${syncedMedia.episode}`
+                        : ''}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {syncedMedia && roomAvailableChannels.length > 1 && (
+                  <div className="hidden md:flex items-center rounded-full border border-white/15 bg-black/70 p-0.5 backdrop-blur-md">
+                    {roomAvailableChannels.map((ch) => (
+                      <button
+                        key={ch}
+                        type="button"
+                        onClick={() => void handleSwitchRoomChannel(ch)}
+                        className={`h-7 rounded-full px-2.5 text-[11px] font-bold transition-colors ${
+                          currentChannel === ch
+                            ? 'bg-[#E50914] text-white'
+                            : 'text-white/70 hover:text-white'
+                        }`}
+                      >
+                        C{ch}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {syncedMedia && currentChannel === 1 && (
+                  <button
+                    type="button"
+                    onClick={handleManualResync}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-black/70 px-3 text-xs font-bold text-white/90 backdrop-blur-md transition-colors hover:bg-white/15"
+                    title="Sincronizar tempo com a sala"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5 text-[#E50914]" />
+                    <span className="hidden sm:inline">Sincronizar</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setIsParticipantsOpen(true)}
+                  aria-label="Abrir participantes"
+                  aria-expanded={isParticipantsOpen}
+                  className="relative flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-black/70 px-3 text-xs font-bold text-white backdrop-blur-md transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
+                  title="Participantes"
+                >
+                  <UserRound className="h-4 w-4 text-[#FF6470]" />
+                  <span>{Math.max(1, peers.length)}</span>
+                </button>
+              </div>
             </div>
+
+            {remoteSyncNotice && (
+              <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/15 bg-black/80 px-3.5 py-1.5 text-xs font-bold text-white shadow-lg backdrop-blur-md">
+                {remoteSyncNotice}
+              </div>
+            )}
 
             {streamSrc ? (
               <>
                 <iframe
+                  ref={iframeRef}
                   key={`${syncedMedia?.tmdbId}-${syncedMedia?.season || 0}-${syncedMedia?.episode || 0}-${currentChannel}`}
                   src={streamSrc}
                   title={syncedMedia?.title || 'Love Flix Player'}
@@ -420,6 +729,7 @@ export const SessaoFlixPage: React.FC = () => {
                   height="100%"
                   scrolling="no"
                   frameBorder="0"
+                  referrerPolicy={currentChannel === 2 ? 'no-referrer' : undefined}
                   onLoad={() => setIframeLoading(false)}
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                   allowFullScreen
@@ -447,8 +757,11 @@ export const SessaoFlixPage: React.FC = () => {
           </section>
 
           <section className="flex min-h-[210px] max-h-[50%] basis-[42%] shrink-0 flex-col overflow-hidden border-t border-white/10 bg-[#0E0E0E] lg:h-auto lg:max-h-none lg:min-h-0 lg:basis-auto lg:shrink lg:border-l lg:border-t-0 lg:w-[360px] xl:w-[400px]">
-            <header className="flex h-12 shrink-0 items-center border-b border-white/[0.08] bg-[#111111] px-4">
+            <header className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.08] bg-[#111111] px-4">
               <span className="text-sm font-bold text-white/90">Chat da Sala</span>
+              <span className="text-[11px] font-semibold text-white/50">
+                {Math.max(1, peers.length)} {Math.max(1, peers.length) === 1 ? 'online' : 'online'}
+              </span>
             </header>
 
             <div
@@ -497,7 +810,7 @@ export const SessaoFlixPage: React.FC = () => {
                     );
                   }
 
-                  const isMe = msg.name === (profile?.name || 'Love Flix');
+                  const isMe = msg.peerId === peerId;
                   return (
                     <div
                       key={msg.id}
@@ -704,41 +1017,55 @@ export const SessaoFlixPage: React.FC = () => {
             </div>
           )}
 
-          {/* Channel Selector */}
+          {/* Channel Selector (only real available channels) */}
           <div className="space-y-3">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-[#A1A1A1]">
-              Selecione o Canal de Transmissão:
-            </h3>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {CHANNELS.map((ch) => {
-                const isSelected = selectedChannel === ch.id;
-                return (
-                  <button
-                    key={ch.id}
-                    type="button"
-                    onClick={() => setSelectedChannel(ch.id)}
-                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-[#E50914]/15 border-[#E50914] text-white shadow-lg'
-                        : 'bg-[#181818] border-white/10 text-[#A1A1A1] hover:text-white hover:bg-[#202020]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-bold text-white">{ch.label}</span>
-                      {isSelected && <span className="w-2 h-2 rounded-full bg-[#E50914]" />}
-                    </div>
-                    <span className="text-[11px] text-[#A1A1A1] block">{ch.desc}</span>
-                  </button>
-                );
-              })}
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-[#A1A1A1]">
+                Selecione o Canal de Transmissão:
+              </h3>
+              {checkingChannels && (
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white/60">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#E50914]" />
+                  <span>Verificando canais...</span>
+                </span>
+              )}
             </div>
+
+            {!checkingChannels && availablePickerChannels.length === 0 ? (
+              <div className="rounded-xl border border-[#E50914]/35 bg-[#E50914]/10 p-4 text-xs font-semibold text-white/90">
+                Este título ou episódio ainda não está disponível nos canais de transmissão.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {CHANNELS.filter((ch) => availablePickerChannels.includes(ch.id)).map((ch) => {
+                  const isSelected = selectedChannel === ch.id;
+                  return (
+                    <button
+                      key={ch.id}
+                      type="button"
+                      onClick={() => setSelectedChannel(ch.id)}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#E50914]/15 border-[#E50914] text-white shadow-lg'
+                          : 'bg-[#181818] border-white/10 text-[#A1A1A1] hover:text-white hover:bg-[#202020]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-white">{ch.label}</span>
+                        {isSelected && <span className="w-2 h-2 rounded-full bg-[#E50914]" />}
+                      </div>
+                      <span className="text-[11px] text-[#A1A1A1] block">{ch.desc}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Submit Button */}
           <button
             type="button"
-            disabled={isSubmitting}
+            disabled={isSubmitting || checkingChannels || availablePickerChannels.length === 0}
             onClick={handleConfirmAndOpenRoom}
             className="w-full h-12 rounded-xl bg-[#E50914] hover:bg-[#FF253A] text-white text-sm font-bold flex items-center justify-center gap-2 shadow-xl transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
           >
@@ -945,7 +1272,10 @@ export const SessaoFlixPage: React.FC = () => {
                 type="text"
                 autoFocus
                 value={inputRoomCode}
-                onChange={(e) => setInputRoomCode(e.target.value.toUpperCase())}
+                onChange={(e) => {
+                  setInputRoomCode(e.target.value.toUpperCase());
+                  if (joinError) setJoinError(null);
+                }}
                 placeholder="Ex: FLIX-4829"
                 className="flex-1 h-12 px-4 rounded-xl bg-[#1A1A1A] border border-white/15 text-sm font-mono font-bold text-white placeholder:text-[#A1A1A1]/50 focus:border-[#E50914] focus:outline-none tracking-wider uppercase"
               />
@@ -961,6 +1291,9 @@ export const SessaoFlixPage: React.FC = () => {
                 )}
               </button>
             </div>
+            {joinError && (
+              <p className="text-xs font-semibold text-[#FF7A83]">{joinError}</p>
+            )}
           </form>
         )}
       </div>

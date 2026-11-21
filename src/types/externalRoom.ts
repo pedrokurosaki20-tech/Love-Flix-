@@ -56,6 +56,7 @@ export interface ExternalRoomPeer {
   source: 'loveflix' | 'external';
   joinedAtMs: number;
   lastSeenMs: number;
+  isHost?: boolean;
 }
 
 export interface ChatMessage {
@@ -88,6 +89,7 @@ export interface ExternalRoomSnapshot {
 
 export interface ExternalRoomConnectOptions {
   roomId: string;
+  mode?: 'create' | 'join';
   returnUrl?: string;
   webhookUrl?: string;
   externalWsUrl?: string;
