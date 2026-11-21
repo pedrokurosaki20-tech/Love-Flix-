@@ -239,7 +239,7 @@ export const StreamingPlayerModal: React.FC = () => {
         setModalAvailableChannels(info.availableChannels);
       })
       .catch(() => {
-        if (!cancelled) setModalAvailableChannels([1, 2, 3]);
+        if (!cancelled) setModalAvailableChannels([]);
       })
       .finally(() => {
         if (!cancelled) setCheckingModalChannels(false);
@@ -324,7 +324,7 @@ export const StreamingPlayerModal: React.FC = () => {
         setActiveAvailableChannels(info.availableChannels);
       })
       .catch(() => {
-        if (!cancelled) setActiveAvailableChannels([1, 2, 3]);
+        if (!cancelled) setActiveAvailableChannels([]);
       });
 
     return () => {
@@ -339,6 +339,16 @@ export const StreamingPlayerModal: React.FC = () => {
     resolvingActiveImdb,
   ]);
 
+  // Auto-switch away if current channel turns out to be unavailable
+  useEffect(() => {
+    if (!activePlayer || activeAvailableChannels === null || activeAvailableChannels.length === 0) {
+      return;
+    }
+    if (!activeAvailableChannels.includes(activePlayer.channel)) {
+      switchPlayerChannel(activeAvailableChannels[0]);
+    }
+  }, [activePlayer, activeAvailableChannels, switchPlayerChannel]);
+
   // 5. Stage 3 + External Room Sync: Listen for iframe events (fallback + play/pause/seek)
   useEffect(() => {
     if (!activePlayer) return;
@@ -351,12 +361,12 @@ export const StreamingPlayerModal: React.FC = () => {
         const pool =
           activeAvailableChannels && activeAvailableChannels.length > 0
             ? activeAvailableChannels
-            : ([1, 2, 3] as Array<1 | 2 | 3>);
+            : ([] as Array<1 | 2 | 3>);
         const nextChannel = pool.find((c) => c !== activePlayer.channel);
+        setActiveAvailableChannels((prev) =>
+          prev ? prev.filter((c) => c !== activePlayer.channel) : prev
+        );
         if (nextChannel) {
-          setActiveAvailableChannels((prev) =>
-            prev ? prev.filter((c) => c !== activePlayer.channel) : [2, 3]
-          );
           switchPlayerChannel(nextChannel);
         }
         return;
@@ -673,7 +683,10 @@ export const StreamingPlayerModal: React.FC = () => {
           }`
         : null;
 
-    const headerChannels = CHANNELS;
+    const headerChannels =
+      activeAvailableChannels === null
+        ? CHANNELS.filter((ch) => ch.id === activePlayer.channel)
+        : CHANNELS.filter((ch) => activeAvailableChannels.includes(ch.id));
     const noPlayerChannelsAvailable =
       activeAvailableChannels !== null && activeAvailableChannels.length === 0;
 
@@ -708,24 +721,19 @@ export const StreamingPlayerModal: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {!noPlayerChannelsAvailable && (
+            {!noPlayerChannelsAvailable && headerChannels.length > 0 && (
               <div className="flex items-center gap-1 p-1 rounded-xl bg-[#121212] border border-white/[0.08]">
                 {headerChannels.map((ch) => {
                   const isSelected = activePlayer.channel === ch.id;
-                  const isUnavailable =
-                    activeAvailableChannels !== null &&
-                    !activeAvailableChannels.includes(ch.id);
                   return (
                     <button
                       key={ch.id}
                       type="button"
                       onClick={() => switchPlayerChannel(ch.id)}
-                      title={isUnavailable ? `${ch.label} (indisponível)` : ch.label}
+                      title={ch.label}
                       className={`px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                         isSelected
                           ? 'bg-[#E50914] text-white shadow'
-                          : isUnavailable
-                          ? 'text-[#666666] hover:text-[#999999]'
                           : 'text-[#A1A1A1] hover:text-white hover:bg-white/[0.06]'
                       }`}
                     >
@@ -888,6 +896,7 @@ export const StreamingPlayerModal: React.FC = () => {
               height="100%"
               scrolling="no"
               frameBorder="0"
+              referrerPolicy={activePlayer.channel === 2 ? 'no-referrer' : undefined}
               onLoad={() => setIframeLoading(false)}
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
               allowFullScreen
@@ -910,16 +919,19 @@ export const StreamingPlayerModal: React.FC = () => {
       ? `Temporada ${watchRequest.season} · Episódio ${watchRequest.episode}`
       : null;
 
-  const isChecking = resolvingImdb || checkingModalChannels;
+  const isChecking =
+    !isModalCinemaExclusive &&
+    (resolvingImdb || checkingModalChannels || modalAvailableChannels === null);
+  const visibleModalChannels = modalAvailableChannels
+    ? CHANNELS.filter((ch) => modalAvailableChannels.includes(ch.id))
+    : [];
   const noChannelsAvailable =
-    !isChecking && modalAvailableChannels !== null && modalAvailableChannels.length === 0;
-  const visibleModalChannels =
-    modalAvailableChannels && modalAvailableChannels.length > 0
-      ? CHANNELS.filter((ch) => modalAvailableChannels.includes(ch.id))
-      : CHANNELS;
+    !isChecking && modalAvailableChannels !== null && visibleModalChannels.length === 0;
   const availabilitySubtitle =
-    modalAvailableChannels && modalAvailableChannels.length > 0
-      ? `${modalAvailableChannels.length} canal${modalAvailableChannels.length > 1 ? 'is' : ''} disponível${modalAvailableChannels.length > 1 ? 'is' : ''}`
+    !isChecking && visibleModalChannels.length > 0
+      ? visibleModalChannels.length === 1
+        ? '1 canal disponível'
+        : `${visibleModalChannels.length} canais disponíveis`
       : null;
 
   return (
@@ -986,6 +998,13 @@ export const StreamingPlayerModal: React.FC = () => {
               Entendido
             </button>
           </div>
+        ) : isChecking ? (
+          <div className="py-8 flex flex-col items-center justify-center gap-3 text-center">
+            <Loader2 className="w-7 h-7 animate-spin text-[#E50914]" />
+            <p className="text-xs sm:text-sm font-medium text-[#A1A1A1]">
+              Verificando canais disponíveis...
+            </p>
+          </div>
         ) : noChannelsAvailable ? (
           <div className="py-3 text-center space-y-4">
             <p className="text-xs sm:text-sm text-[#A1A1A1] leading-relaxed">
@@ -1017,7 +1036,7 @@ export const StreamingPlayerModal: React.FC = () => {
                 </span>
 
                 <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#A1A1A1] group-hover:text-white transition-colors">
-                  {(isChecking && modalAvailableChannels === null) || sendingToRoom ? (
+                  {sendingToRoom ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   ) : (
                     <>

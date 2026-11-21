@@ -1,5 +1,5 @@
 import { BROWSER_USER_AGENT, FALLBACK_SERVER_KEY } from './hlsEngine.js';
-import { getSuperFlixCatalogIndex } from './catalogAvailability.js';
+import { getStreamBetterCatalogIndex, getSuperFlixCatalogIndex } from './catalogAvailability.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const CACHE_TTL_MS = 15 * 60 * 1000;
@@ -99,7 +99,7 @@ async function probeChannelOne(tmdbId: string): Promise<boolean> {
     const res = await fetch(url, {
       headers: {
         'User-Agent': BROWSER_USER_AGENT,
-        Referer: 'https://supercdn.org/',
+        Referer: 'https://plenoflu.com/',
         Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
       },
       redirect: 'follow',
@@ -116,12 +116,17 @@ async function probeChannelOne(tmdbId: string): Promise<boolean> {
 }
 
 async function hasAnyWorkingChannel(tmdbId: string): Promise<boolean> {
-  const [catalog, channel1, channel3] = await Promise.all([
+  const [catalog, sbCatalog, channel1] = await Promise.all([
     getSuperFlixCatalogIndex(),
+    getStreamBetterCatalogIndex(),
     probeChannelOne(tmdbId),
-    probeStreamBetter(tmdbId),
   ]);
-  return (catalog.loadedOk && catalog.movieTmdbIds.has(tmdbId)) || channel1 || channel3;
+  const channel2 = catalog.loadedOk && catalog.movieTmdbIds.has(tmdbId);
+  if (channel1 || channel2) return true;
+  if (sbCatalog.loadedOk) {
+    return sbCatalog.movieIds.has(tmdbId);
+  }
+  return probeStreamBetter(tmdbId);
 }
 
 async function probeStreamBetter(tmdbId: string): Promise<boolean> {
@@ -135,7 +140,7 @@ async function probeStreamBetter(tmdbId: string): Promise<boolean> {
       signal: AbortSignal.timeout(3500),
     });
     const body = res.ok ? await res.text() : '';
-    const unavailable = /content-unavailable-page|conte[uú]do\s+indispon[ií]vel|n[aã]o\s+encontrado/i.test(body);
+    const unavailable = /content-unavailable-page|n[aã]o\s+conseguimos\s+tocar|conte[uú]do\s+indispon[ií]vel|n[aã]o\s+encontrado/i.test(body);
     const available = res.ok && !unavailable;
     channelProbeCache.set(url, { available, expiresAt: Date.now() + CHANNEL_PROBE_TTL_MS });
     return available;

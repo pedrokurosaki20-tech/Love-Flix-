@@ -731,12 +731,15 @@ export const tmdbService = {
           availableChannels?: Array<1 | 2 | 3>;
           recommendedChannel?: 1 | 2 | 3 | null;
         };
+        const availableChannels = Array.isArray(data.availableChannels)
+          ? data.availableChannels
+          : ([] as Array<1 | 2 | 3>);
         const result = {
-          availableChannels: Array.isArray(data.availableChannels)
-            ? data.availableChannels
-            : ([1, 2, 3] as Array<1 | 2 | 3>),
+          availableChannels,
           recommendedChannel:
-            data.recommendedChannel !== undefined ? data.recommendedChannel : 1,
+            data.recommendedChannel !== undefined
+              ? data.recommendedChannel
+              : availableChannels[0] ?? null,
         };
         clientCache.set(url, {
           data: result,
@@ -745,8 +748,8 @@ export const tmdbService = {
         return result;
       } catch {
         return {
-          availableChannels: [1, 2, 3] as Array<1 | 2 | 3>,
-          recommendedChannel: 1 as const,
+          availableChannels: [] as Array<1 | 2 | 3>,
+          recommendedChannel: null,
         };
       } finally {
         inFlightRequests.delete(url);

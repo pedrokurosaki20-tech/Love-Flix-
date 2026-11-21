@@ -37,31 +37,243 @@ const inFlightCuratedDoramas = new Map<
 >();
 const CURATED_DORAMAS_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
+const SUPERFLIX_HOSTS = ['https://superflixapi.boats', 'https://superflixapi.fun'];
+const STREAMBETTER_HOSTS = ['https://streambetter.lol', 'https://streambetter.bond'];
+
+interface StreamBetterCatalogState {
+  movieIds: Set<string>;
+  tvIds: Set<string>;
+  animeIds: Set<string>;
+  doramaIds: Set<string>;
+  etag: string | null;
+  loadedOk: boolean;
+  expiresAt: number;
+}
+
+export interface StreamBetterTitleMeta {
+  exists: boolean;
+  type: string | null;
+  seasons: number[];
+}
+
+let streamBetterCatalog: StreamBetterCatalogState | null = null;
+let inFlightSbCatalogLoad: Promise<StreamBetterCatalogState> | null = null;
+const STREAMBETTER_CATALOG_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+const streamBetterTitleMetaCache = new Map<
+  string,
+  { meta: StreamBetterTitleMeta; expiresAt: number }
+>();
+const inFlightSbTitleMeta = new Map<string, Promise<StreamBetterTitleMeta | null>>();
+const STREAMBETTER_META_TTL_MS = 15 * 60 * 1000;
+
 async function fetchSuperFlixList(
   category: 'dorama' | 'serie' | 'anime' | 'filme',
   type: 'tmdb' | 'imdb'
 ): Promise<string[] | null> {
-  try {
-    const res = await fetch(
-      `https://superflixapi.fun/lista?category=${category}&type=${type}&format=json`,
-      {
-        method: 'GET',
-        headers: {
-          'User-Agent': BROWSER_USER_AGENT,
-          Referer: 'https://superflixapi.fun/',
-          Accept: 'application/json, text/plain, */*',
-        },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(7000),
-      }
-    );
-    if (!res.ok) return null;
-    const json = (await res.json()) as unknown;
-    if (!Array.isArray(json)) return null;
-    return json.map((item) => String(item).trim()).filter(Boolean);
-  } catch {
-    return null;
+  for (const host of SUPERFLIX_HOSTS) {
+    try {
+      const res = await fetch(
+        `${host}/lista?category=${category}&type=${type}&format=json`,
+        {
+          method: 'GET',
+          headers: {
+            'User-Agent': BROWSER_USER_AGENT,
+            Referer: `${host}/`,
+            Accept: 'application/json, text/plain, */*',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(7000),
+        }
+      );
+      if (!res.ok) continue;
+      const json = (await res.json()) as unknown;
+      if (!Array.isArray(json)) continue;
+      return json.map((item) => String(item).trim()).filter(Boolean);
+    } catch {
+      // try next SuperFlix host
+    }
   }
+  return null;
+}
+
+export async function getStreamBetterCatalogIndex(): Promise<StreamBetterCatalogState> {
+  if (streamBetterCatalog && streamBetterCatalog.expiresAt > Date.now()) {
+    return streamBetterCatalog;
+  }
+  if (inFlightSbCatalogLoad) {
+    return inFlightSbCatalogLoad;
+  }
+
+  inFlightSbCatalogLoad = (async (): Promise<StreamBetterCatalogState> => {
+    try {
+      for (const host of STREAMBETTER_HOSTS) {
+        try {
+          const headers: Record<string, string> = {
+            'User-Agent': BROWSER_USER_AGENT,
+            Accept: 'application/json',
+          };
+          if (streamBetterCatalog?.loadedOk && streamBetterCatalog.etag) {
+            headers['If-None-Match'] = streamBetterCatalog.etag;
+          }
+          const res = await fetch(`${host}/api/titles/ids`, {
+            method: 'GET',
+            headers,
+            signal: AbortSignal.timeout(6500),
+          });
+          if (res.status === 304 && streamBetterCatalog?.loadedOk) {
+            streamBetterCatalog = {
+              ...streamBetterCatalog,
+              expiresAt: Date.now() + STREAMBETTER_CATALOG_TTL_MS,
+            };
+            return streamBetterCatalog;
+          }
+          if (!res.ok) continue;
+          const json = (await res.json()) as {
+            success?: boolean;
+            counts?: Record<string, number>;
+            ids?: {
+              movie?: Array<number | string>;
+              tv?: Array<number | string>;
+              anime?: Array<number | string>;
+              dorama?: Array<number | string>;
+            };
+          };
+          if (!json?.success || !json.ids) continue;
+
+          const toSet = (arr?: Array<number | string>) => {
+            const set = new Set<string>();
+            if (Array.isArray(arr)) {
+              for (const item of arr) {
+                const s = String(item).trim();
+                if (s) set.add(s);
+              }
+            }
+            return set;
+          };
+
+          const movieIds = toSet(json.ids.movie);
+          const tvIds = toSet(json.ids.tv);
+          const animeIds = toSet(json.ids.anime);
+          const doramaIds = toSet(json.ids.dorama);
+
+          const counts = json.counts || {};
+          const validMovies =
+            typeof counts.movie !== 'number' || counts.movie === (json.ids.movie?.length ?? 0);
+          const validTv =
+            typeof counts.tv !== 'number' || counts.tv === (json.ids.tv?.length ?? 0);
+          const loadedOk =
+            validMovies && validTv && (movieIds.size > 0 || tvIds.size > 0);
+
+          if (!loadedOk) continue;
+
+          const state: StreamBetterCatalogState = {
+            movieIds,
+            tvIds,
+            animeIds,
+            doramaIds,
+            etag: res.headers.get('etag'),
+            loadedOk: true,
+            expiresAt: Date.now() + STREAMBETTER_CATALOG_TTL_MS,
+          };
+          streamBetterCatalog = state;
+          return state;
+        } catch {
+          // try next host
+        }
+      }
+
+      if (streamBetterCatalog?.loadedOk) {
+        streamBetterCatalog = {
+          ...streamBetterCatalog,
+          expiresAt: Date.now() + 2 * 60 * 1000,
+        };
+        return streamBetterCatalog;
+      }
+
+      const emptyState: StreamBetterCatalogState = {
+        movieIds: new Set<string>(),
+        tvIds: new Set<string>(),
+        animeIds: new Set<string>(),
+        doramaIds: new Set<string>(),
+        etag: null,
+        loadedOk: false,
+        expiresAt: Date.now() + 60 * 1000,
+      };
+      streamBetterCatalog = emptyState;
+      return emptyState;
+    } finally {
+      inFlightSbCatalogLoad = null;
+    }
+  })();
+
+  return inFlightSbCatalogLoad;
+}
+
+export async function getStreamBetterTitleMeta(
+  tmdbId: string | number
+): Promise<StreamBetterTitleMeta | null> {
+  const cleanId = String(tmdbId).replace(/\D/g, '');
+  if (!cleanId) return null;
+
+  const cached = streamBetterTitleMetaCache.get(cleanId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.meta;
+  }
+
+  const inflight = inFlightSbTitleMeta.get(cleanId);
+  if (inflight) return inflight;
+
+  const task = (async (): Promise<StreamBetterTitleMeta | null> => {
+    for (const host of STREAMBETTER_HOSTS) {
+      try {
+        const res = await fetch(`${host}/api/titles?tmdb_id=${encodeURIComponent(cleanId)}`, {
+          method: 'GET',
+          headers: {
+            'User-Agent': BROWSER_USER_AGENT,
+            Accept: 'application/json',
+          },
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!res.ok) continue;
+        const json = (await res.json()) as {
+          success?: boolean;
+          exists?: boolean;
+          title?: { type?: string } | null;
+          seasons?: Array<{ season_number?: number }>;
+        };
+        if (!json?.success) continue;
+
+        const meta: StreamBetterTitleMeta = {
+          exists: Boolean(json.exists),
+          type: json.title?.type ? String(json.title.type) : null,
+          seasons: Array.isArray(json.seasons)
+            ? json.seasons
+                .map((s) => Number(s.season_number))
+                .filter((n) => Number.isFinite(n))
+            : [],
+        };
+
+        if (streamBetterTitleMetaCache.size >= MAX_PROBE_CACHE_ENTRIES) {
+          const oldest = streamBetterTitleMetaCache.keys().next().value;
+          if (oldest) streamBetterTitleMetaCache.delete(oldest);
+        }
+        streamBetterTitleMetaCache.set(cleanId, {
+          meta,
+          expiresAt: Date.now() + STREAMBETTER_META_TTL_MS,
+        });
+        return meta;
+      } catch {
+        // try next host
+      }
+    }
+    return null;
+  })().finally(() => {
+    inFlightSbTitleMeta.delete(cleanId);
+  });
+
+  inFlightSbTitleMeta.set(cleanId, task);
+  return task;
 }
 
 export async function getSuperFlixCatalogIndex(): Promise<SuperFlixCatalogState> {
@@ -144,7 +356,7 @@ export async function probeStreamBetterAvailable(
   options: { failOpen?: boolean } = {}
 ): Promise<boolean> {
   if (!slot3Url) return false;
-  const failOpen = options.failOpen !== false;
+  const failOpen = options.failOpen === true;
   const cached = streamBetterProbeCache.get(slot3Url);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.available;
@@ -162,7 +374,7 @@ export async function probeStreamBetterAvailable(
           Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
         },
         redirect: 'follow',
-        signal: AbortSignal.timeout(4200),
+        signal: AbortSignal.timeout(4500),
       });
 
       if (res.status === 404 || res.status === 410) {
@@ -298,8 +510,9 @@ export async function discoverCuratedDoramas(
       const globalPage2 = new URLSearchParams(baseParams);
       globalPage2.set('page', String((requestedPage - 1) * 2 + 2));
 
-      const [sfIndex, brData, global1Data, global2Data] = await Promise.all([
+      const [sfIndex, sbIndex, brData, global1Data, global2Data] = await Promise.all([
         getSuperFlixCatalogIndex(),
+        getStreamBetterCatalogIndex(),
         fetchTmdbDiscoverTvPage(brParams, apiKey),
         fetchTmdbDiscoverTvPage(globalPage1, apiKey),
         fetchTmdbDiscoverTvPage(globalPage2, apiKey),
@@ -332,7 +545,7 @@ export async function discoverCuratedDoramas(
         }
       }
 
-      if (!sfIndex.loadedOk) {
+      if (!sfIndex.loadedOk && !sbIndex.loadedOk) {
         const fallbackPayload = {
           page: requestedPage,
           results: candidates.slice(0, 20),
@@ -345,28 +558,31 @@ export async function discoverCuratedDoramas(
         return fallbackPayload;
       }
 
-      // Partition into instant SuperFlix hits (100% playable) vs candidates needing StreamBetter check
+      // Partition into instant SuperFlix / StreamBetter index hits vs candidates needing live probe
       const verified: Array<Record<string, unknown>> = [];
       const needsSecondaryProbe: Array<{ idx: number; item: Record<string, unknown> }> = [];
       const acceptedByIndex = new Map<number, Record<string, unknown>>();
 
       candidates.forEach((item, idx) => {
         const idStr = String(item.id);
-        if (sfIndex.tvTmdbIds.has(idStr)) {
+        if (
+          (sfIndex.loadedOk && sfIndex.tvTmdbIds.has(idStr)) ||
+          (sbIndex.loadedOk && sbIndex.tvIds.has(idStr))
+        ) {
           acceptedByIndex.set(idx, item);
-        } else if (needsSecondaryProbe.length < 14) {
+        } else if (!sbIndex.loadedOk && needsSecondaryProbe.length < 14) {
           needsSecondaryProbe.push({ idx, item });
         }
       });
 
-      // Probe StreamBetter in parallel (capped at 2.6s) so Doramas available ONLY on Canal 3 are preserved!
+      // Probe StreamBetter only if its catalog index wasn't loaded
       if (needsSecondaryProbe.length > 0 && acceptedByIndex.size < 22) {
         await Promise.race([
           Promise.allSettled(
             needsSecondaryProbe.map(async ({ idx, item }) => {
               const idStr = String(item.id);
               const sbUrl = `https://streambetter.lol/serie/${idStr}/1/1?key=${STREAMBETTER_PUBLIC_KEY}`;
-              const ok = await probeStreamBetterAvailable(sbUrl);
+              const ok = await probeStreamBetterAvailable(sbUrl, { failOpen: false });
               if (ok) {
                 acceptedByIndex.set(idx, item);
               }
@@ -381,19 +597,6 @@ export async function discoverCuratedDoramas(
         const item = acceptedByIndex.get(idx);
         if (item) verified.push(item);
         if (verified.length >= 20) break;
-      }
-
-      // Safety net: if fewer than 6 items matched (e.g. ultra-narrow filter combination), top up from BR/global candidates
-      if (verified.length < 6) {
-        const verifiedIds = new Set(verified.map((v) => Number(v.id)));
-        for (const item of candidates) {
-          const id = Number(item.id);
-          if (!verifiedIds.has(id)) {
-            verifiedIds.add(id);
-            verified.push(item);
-          }
-          if (verified.length >= 12) break;
-        }
       }
 
       const payload: CuratedDoramasCacheEntry['payload'] = {

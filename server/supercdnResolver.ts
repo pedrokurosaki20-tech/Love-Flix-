@@ -9,6 +9,8 @@ import {
 import {
   STREAMBETTER_PUBLIC_KEY,
   checkSuperFlixCatalogAvailable,
+  getStreamBetterCatalogIndex,
+  getStreamBetterTitleMeta,
   probeStreamBetterAvailable,
 } from './catalogAvailability.js';
 import { isMovieCinemaOnly } from './cinemaFilter.js';
@@ -424,10 +426,10 @@ async function resolveAllTitleProviders(params: {
       if (type === 'movie') {
         const movieRef = hasValidImdb ? imdb : tmdbId || '';
         if (movieRef) {
-          slot2Url = `https://superflixapi.fun/filme/${movieRef}#noEpList`;
+          slot2Url = `https://superflixapi.boats/filme/${movieRef}#noEpList`;
         }
       } else if (tmdbId) {
-        slot2Url = `https://superflixapi.fun/serie/${tmdbId}/${season}/${episode}#noEpList`;
+        slot2Url = `https://superflixapi.boats/serie/${tmdbId}/${season}/${episode}#noEpList`;
       }
     }
 
@@ -521,11 +523,16 @@ export async function resolveSuperCdnChannel(params: {
     });
 
     if (channel === 2) {
-      const sfCatalog = providers.hasExplicitSuperFlix
-        ? true
-        : await checkSuperFlixCatalogAvailable({ type, tmdbId, imdb });
+      const [sfCatalog, episodeReleased] = await Promise.all([
+        providers.hasExplicitSuperFlix
+          ? Promise.resolve(true as const)
+          : checkSuperFlixCatalogAvailable({ type, tmdbId, imdb }),
+        type === 'tvshow' && tmdbId && !providers.hasExplicitSuperFlix
+          ? verifyTmdbEpisodeAvailability(tmdbId, season, episode)
+          : Promise.resolve(true as const),
+      ]);
 
-      if (!providers.slot2Url || sfCatalog === false) {
+      if (!providers.slot2Url || sfCatalog !== true || episodeReleased === false) {
         return {
           kind: 'html',
           available: false,
@@ -551,7 +558,13 @@ export async function resolveSuperCdnChannel(params: {
     if (channel === 3) {
       const sbOk = providers.hasExplicitStreamBetter
         ? true
-        : await probeStreamBetterAvailable(providers.slot3Url);
+        : await verifyStreamBetterExactAvailability({
+            type,
+            tmdbId,
+            season,
+            episode,
+            slot3Url: providers.slot3Url,
+          });
 
       if (!providers.slot3Url || !sbOk) {
         return {
@@ -877,7 +890,7 @@ export async function checkTitleChannelAvailability(params: {
       episode,
     });
 
-    const [ch1Entry, sfStatus, sbAvailable] = await Promise.all([
+    const [ch1Entry, sfStatus, sbAvailable, episodeReleased] = await Promise.all([
       providers.slot1
         ? resolveSuperCdnChannel({
             type,
@@ -894,12 +907,25 @@ export async function checkTitleChannelAvailability(params: {
         : checkSuperFlixCatalogAvailable({ type, tmdbId, imdb }),
       providers.hasExplicitStreamBetter
         ? Promise.resolve(true)
-        : probeStreamBetterAvailable(providers.slot3Url),
+        : verifyStreamBetterExactAvailability({
+            type,
+            tmdbId,
+            season,
+            episode,
+            slot3Url: providers.slot3Url,
+          }),
+      type === 'tvshow' && tmdbId
+        ? verifyTmdbEpisodeAvailability(tmdbId, season, episode)
+        : Promise.resolve(true as const),
     ]);
 
     const ch1Ok = Boolean(ch1Entry && ch1Entry.available);
-    const ch2Ok = Boolean(providers.slot2Url) && sfStatus !== false;
-    const ch3Ok = Boolean(providers.slot3Url) && sbAvailable;
+    const ch2Ok =
+      Boolean(providers.slot2Url) &&
+      (providers.hasExplicitSuperFlix || (sfStatus === true && episodeReleased !== false));
+    const ch3Ok =
+      Boolean(providers.slot3Url) &&
+      (providers.hasExplicitStreamBetter || (sbAvailable && episodeReleased !== false));
 
     const availableChannels: Array<1 | 2 | 3> = [];
     if (ch1Ok) availableChannels.push(1);
@@ -983,8 +1009,134 @@ export async function resolveStreamWithFallback(params: {
 }
 
 const tmdbImdbCache = new Map<string, { imdb: string; expiresAt: number }>();
+const tmdbSeasonEpisodesCache = new Map<
+  string,
+  { episodes: Map<number, string>; expiresAt: number }
+>();
+const inFlightTmdbSeasons = new Map<string, Promise<Map<number, string> | null>>();
 const tvSearchAvailCache = new Map<string, { available: boolean; expiresAt: number }>();
 const inFlightTvSearchAvail = new Map<string, Promise<boolean>>();
+
+async function getTmdbSeasonEpisodeDates(
+  tmdbId: string,
+  season: string
+): Promise<Map<number, string> | null> {
+  const cleanId = String(tmdbId).replace(/\D/g, '');
+  const seasonNum = Number(season);
+  if (!cleanId || !Number.isInteger(seasonNum) || seasonNum < 0) return null;
+
+  const key = `${cleanId}:${seasonNum}`;
+  const cached = tmdbSeasonEpisodesCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.episodes;
+  }
+
+  const inflight = inFlightTmdbSeasons.get(key);
+  if (inflight) return inflight;
+
+  const apiKey = process.env.TMDB_API_KEY || FALLBACK_SERVER_KEY;
+  if (!apiKey) return null;
+
+  const task = (async (): Promise<Map<number, string> | null> => {
+    try {
+      const res = await fetch(
+        `https://api.themoviedb.org/3/tv/${encodeURIComponent(cleanId)}/season/${seasonNum}?api_key=${encodeURIComponent(apiKey)}&language=pt-BR`,
+        {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(4500),
+        }
+      );
+      if (res.status === 404) {
+        const empty = new Map<number, string>();
+        tmdbSeasonEpisodesCache.set(key, {
+          episodes: empty,
+          expiresAt: Date.now() + 15 * 60 * 1000,
+        });
+        return empty;
+      }
+      if (!res.ok) return null;
+      const json = (await res.json()) as {
+        episodes?: Array<{ episode_number?: number; air_date?: string | null }>;
+      };
+      const map = new Map<number, string>();
+      if (Array.isArray(json.episodes)) {
+        for (const ep of json.episodes) {
+          const num = Number(ep?.episode_number);
+          if (Number.isInteger(num) && num > 0) {
+            map.set(num, typeof ep.air_date === 'string' ? ep.air_date.slice(0, 10) : '');
+          }
+        }
+      }
+      if (tmdbSeasonEpisodesCache.size > 1500) {
+        const oldest = tmdbSeasonEpisodesCache.keys().next().value;
+        if (oldest) tmdbSeasonEpisodesCache.delete(oldest);
+      }
+      tmdbSeasonEpisodesCache.set(key, {
+        episodes: map,
+        expiresAt: Date.now() + 15 * 60 * 1000,
+      });
+      return map;
+    } catch {
+      return null;
+    } finally {
+      inFlightTmdbSeasons.delete(key);
+    }
+  })();
+
+  inFlightTmdbSeasons.set(key, task);
+  return task;
+}
+
+async function verifyTmdbEpisodeAvailability(
+  tmdbId: string,
+  season: string,
+  episode: string
+): Promise<boolean | 'unknown'> {
+  const epNum = Number(episode);
+  if (!Number.isInteger(epNum) || epNum <= 0) return false;
+  const epMap = await getTmdbSeasonEpisodeDates(tmdbId, season);
+  if (!epMap) return 'unknown';
+  if (!epMap.has(epNum)) return false;
+  const airDate = epMap.get(epNum) || '';
+  if (!airDate) return false;
+  const today = new Date().toISOString().slice(0, 10);
+  return airDate <= today;
+}
+
+async function verifyStreamBetterExactAvailability(params: {
+  type: 'movie' | 'tvshow';
+  tmdbId?: string;
+  season: string;
+  episode: string;
+  slot3Url: string;
+}): Promise<boolean> {
+  if (!params.slot3Url) return false;
+  const cleanId = (params.tmdbId || '').replace(/\D/g, '');
+  if (!cleanId) {
+    return probeStreamBetterAvailable(params.slot3Url, { failOpen: false });
+  }
+
+  const sbIndex = await getStreamBetterCatalogIndex();
+  if (sbIndex.loadedOk) {
+    const inCatalog =
+      params.type === 'movie' ? sbIndex.movieIds.has(cleanId) : sbIndex.tvIds.has(cleanId);
+    if (!inCatalog) {
+      return false;
+    }
+  }
+
+  if (params.type === 'tvshow') {
+    const seasonNum = Number(params.season || 1);
+    const meta = await getStreamBetterTitleMeta(cleanId);
+    if (meta) {
+      if (!meta.exists || !meta.seasons.includes(seasonNum)) {
+        return false;
+      }
+    }
+  }
+
+  return probeStreamBetterAvailable(params.slot3Url, { failOpen: false });
+}
 
 async function resolveTmdbImdbId(mediaType: 'movie' | 'tv', tmdbId: string): Promise<string> {
   const key = `${mediaType}:${tmdbId}`;
@@ -1036,7 +1188,7 @@ export async function checkMovieChannelOneAvailability(tmdbId: string): Promise<
 
 /**
  * Fast 3-channel TV availability check for search & trending filtering:
- * Canal 2 (in-memory SuperFlix catalog) -> Canal 3 (StreamBetter) -> Canal 1 (SuperCDN/VaiQueCol).
+ * Canal 2 (in-memory SuperFlix catalog) -> Canal 3 (in-memory StreamBetter catalog / live probe) -> Canal 1 (Plenoflu/VaiQueCol).
  * Keeps every series/anime/dorama available in at least 1 of the 3 channels; excludes 0/3 titles.
  */
 export async function checkTvSearchAvailability(tmdbId: string | number): Promise<boolean> {
@@ -1053,25 +1205,33 @@ export async function checkTvSearchAvailability(tmdbId: string | number): Promis
 
   const task = (async (): Promise<boolean> => {
     try {
-      // 1. Instant 0ms in-memory check against Canal 2 (SuperFlix)
-      const sfStatus = await checkSuperFlixCatalogAvailable({
-        type: 'tvshow',
-        tmdbId: cleanId,
-      });
+      // 1. Instant 0ms in-memory check against Canal 2 (SuperFlix) and Canal 3 (StreamBetter)
+      const [sfStatus, sbIndex] = await Promise.all([
+        checkSuperFlixCatalogAvailable({ type: 'tvshow', tmdbId: cleanId }),
+        getStreamBetterCatalogIndex(),
+      ]);
+
       if (sfStatus === true) {
         saveTvSearchAvailCache(cleanId, true);
         return true;
       }
 
-      // 2. Canal 3 (StreamBetter) live check
-      const sbUrl = `https://streambetter.lol/serie/${cleanId}/1/1?key=${STREAMBETTER_PUBLIC_KEY}`;
-      const sbOk = await probeStreamBetterAvailable(sbUrl, { failOpen: false });
-      if (sbOk) {
-        saveTvSearchAvailCache(cleanId, true);
-        return true;
+      if (sbIndex.loadedOk) {
+        if (sbIndex.tvIds.has(cleanId)) {
+          saveTvSearchAvailCache(cleanId, true);
+          return true;
+        }
+      } else {
+        // Fallback live probe if StreamBetter index couldn't load
+        const sbUrl = `https://streambetter.lol/serie/${cleanId}/1/1?key=${STREAMBETTER_PUBLIC_KEY}`;
+        const sbOk = await probeStreamBetterAvailable(sbUrl, { failOpen: false });
+        if (sbOk) {
+          saveTvSearchAvailCache(cleanId, true);
+          return true;
+        }
       }
 
-      // 3. Canal 1 (SuperCDN / VaiQueCol) with IMDb ID lookup fallback
+      // 3. Canal 1 (Plenoflu / VaiQueCol) with IMDb ID lookup fallback
       const imdb = await resolveTmdbImdbId('tv', cleanId);
       const ch1 = await resolveSuperCdnChannel({
         type: 'tvshow',
