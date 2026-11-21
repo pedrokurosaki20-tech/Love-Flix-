@@ -87,6 +87,24 @@ export const StreamingPlayerModal: React.FC = () => {
   const [isIntroMuted, setIsIntroMuted] = useState(false);
   const introVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastIntroContentKeyRef = useRef<string | null>(null);
+  const waitIntroStreamKeyRef = useRef<string | null>(null);
+  const waitIntroFlagRef = useRef<boolean>(false);
+
+  const currentContentKey = activePlayer
+    ? `${activePlayer.mediaType}-${activePlayer.id}-${activePlayer.season || 0}-${activePlayer.episode || 0}`
+    : null;
+  const isIntroPendingForCurrentContent = Boolean(
+    currentContentKey && lastIntroContentKeyRef.current !== currentContentKey
+  );
+  const effectiveIsPlayingIntro = isPlayingIntro || isIntroPendingForCurrentContent;
+
+  const notifyIframeIntroEnded = useCallback(() => {
+    try {
+      iframeRef.current?.contentWindow?.postMessage({ type: 'LOVEFLIX_END_INTRO' }, '*');
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const handleEndIntro = useCallback(() => {
     if (introVideoRef.current) {
@@ -97,7 +115,8 @@ export const StreamingPlayerModal: React.FC = () => {
       }
     }
     setIsPlayingIntro(false);
-  }, []);
+    notifyIframeIntroEnded();
+  }, [notifyIframeIntroEnded]);
 
   const toggleIntroSound = useCallback(() => {
     if (introVideoRef.current) {
@@ -114,6 +133,8 @@ export const StreamingPlayerModal: React.FC = () => {
   useEffect(() => {
     if (!activePlayer) {
       lastIntroContentKeyRef.current = null;
+      waitIntroStreamKeyRef.current = null;
+      waitIntroFlagRef.current = false;
       setIsPlayingIntro(false);
       return;
     }
@@ -126,6 +147,13 @@ export const StreamingPlayerModal: React.FC = () => {
       setIsIntroMuted(false);
     }
   }, [activePlayer?.id, activePlayer?.mediaType, activePlayer?.season, activePlayer?.episode]);
+
+  // Notify preloaded Canal 1 iframe as soon as the official opening ends
+  useEffect(() => {
+    if (activePlayer && !effectiveIsPlayingIntro) {
+      notifyIframeIntroEnded();
+    }
+  }, [activePlayer, effectiveIsPlayingIntro, notifyIframeIntroEnded]);
 
   // Autoplay intro video with full audio upon launch
   useEffect(() => {
@@ -377,6 +405,12 @@ export const StreamingPlayerModal: React.FC = () => {
         return;
       }
 
+      if (d.type === 'LOVEFLIX_PLAYER_IFRAME_BOOT' || d.type === 'LOVEFLIX_PLAYER_READY') {
+        if (!effectiveIsPlayingIntro) {
+          notifyIframeIntroEnded();
+        }
+      }
+
       if (d.type === 'LOVEFLIX_PLAYER_READY' && isRoomConnected && iframeRef.current?.contentWindow) {
         if (
           syncedPlayback &&
@@ -419,8 +453,10 @@ export const StreamingPlayerModal: React.FC = () => {
   }, [
     activePlayer,
     activeAvailableChannels,
+    effectiveIsPlayingIntro,
     getLiveRoomPositionSec,
     isRoomConnected,
+    notifyIframeIntroEnded,
     switchPlayerChannel,
     syncPlaybackToExternalRoom,
     syncedMedia,
@@ -644,6 +680,8 @@ export const StreamingPlayerModal: React.FC = () => {
     }
     setIsPlayingIntro(false);
     lastIntroContentKeyRef.current = null;
+    waitIntroStreamKeyRef.current = null;
+    waitIntroFlagRef.current = false;
     exitNativeFullscreenIfActive();
     closePlayerSession();
   };
@@ -660,6 +698,12 @@ export const StreamingPlayerModal: React.FC = () => {
   // 1. FULLSCREEN IN-APP SUPERCDN PLAYER (100% Viewport + Native Fullscreen)
   // ==========================================================================
   if (activePlayer) {
+    const streamIdentityKey = `${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`;
+    if (waitIntroStreamKeyRef.current !== streamIdentityKey) {
+      waitIntroStreamKeyRef.current = streamIdentityKey;
+      waitIntroFlagRef.current = activePlayer.channel === 1 && effectiveIsPlayingIntro;
+    }
+
     const superCdnType = activePlayer.mediaType === 'tv' ? 'tvshow' : 'movie';
     const streamParams = new URLSearchParams({
       type: superCdnType,
@@ -671,10 +715,17 @@ export const StreamingPlayerModal: React.FC = () => {
       streamParams.set('season', String(activePlayer.season || 1));
       streamParams.set('episode', String(activePlayer.episode || 1));
     }
+    if (activePlayer.channel === 1 && waitIntroFlagRef.current) {
+      streamParams.set('waitIntro', '1');
+    }
 
     const streamSrc = !resolvingActiveImdb
       ? `/api/supercdn/stream?${streamParams.toString()}`
       : null;
+    const canPreloadBehindIntro = activePlayer.channel === 1 || activePlayer.channel === 2;
+    const shouldMountIframe =
+      Boolean(streamSrc && streamSrc.trim()) &&
+      (!effectiveIsPlayingIntro || canPreloadBehindIntro);
 
     const episodeSubtitle =
       activePlayer.mediaType === 'tv' && activePlayer.season && activePlayer.episode
@@ -766,7 +817,7 @@ export const StreamingPlayerModal: React.FC = () => {
           className="relative flex-1 w-full h-full min-h-0 bg-black overflow-hidden"
         >
           {/* Official Love Flix Opening Video with Sound */}
-          {isPlayingIntro && (
+          {effectiveIsPlayingIntro && (
             <div className="absolute inset-0 z-40 bg-black flex flex-col items-center justify-center select-none overflow-hidden">
               <video
                 ref={introVideoRef}
@@ -832,7 +883,7 @@ export const StreamingPlayerModal: React.FC = () => {
             </div>
           )}
 
-          {(resolvingActiveImdb || iframeLoading) && !noPlayerChannelsAvailable && !isPlayingIntro ? (
+          {(resolvingActiveImdb || iframeLoading) && !noPlayerChannelsAvailable && !effectiveIsPlayingIntro ? (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[#080808] pointer-events-none">
               <Loader2 className="w-9 h-9 animate-spin text-[#E50914]" />
               <p className="text-xs sm:text-sm font-semibold text-[#A1A1A1]">
@@ -886,10 +937,10 @@ export const StreamingPlayerModal: React.FC = () => {
                 </button>
               </div>
             </div>
-          ) : !isPlayingIntro && streamSrc && streamSrc.trim() ? (
+          ) : shouldMountIframe && streamSrc ? (
             <iframe
               ref={iframeRef}
-              key={`${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`}
+              key={streamIdentityKey}
               src={streamSrc}
               title={`${activePlayer.title} — Canal ${activePlayer.channel}`}
               width="100%"
@@ -900,7 +951,9 @@ export const StreamingPlayerModal: React.FC = () => {
               onLoad={() => setIframeLoading(false)}
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
               allowFullScreen
-              className="w-full h-full border-0 bg-black"
+              className={`w-full h-full border-0 bg-black ${
+                effectiveIsPlayingIntro ? 'pointer-events-none' : ''
+              }`}
             />
           ) : null}
         </div>

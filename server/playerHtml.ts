@@ -278,6 +278,7 @@ export function renderDirectVideoHtml(
       let resumingFromGate = false;
       let isInitialAutoplay = true;
       let pendingRemoteState = null;
+      let holdingForIntro = false;
 
       const postToParent = (payload) => {
         try {
@@ -298,6 +299,11 @@ export function renderDirectVideoHtml(
 
       try {
         const initParams = new URLSearchParams(window.location.search);
+        if (initParams.get('waitIntro') === '1') {
+          holdingForIntro = true;
+          video.autoplay = false;
+          video.removeAttribute('autoplay');
+        }
         const startAtRaw = Number(initParams.get('startAt'));
         const pausedParam = initParams.get('paused');
         if ((Number.isFinite(startAtRaw) && startAtRaw > 0) || pausedParam === '1' || pausedParam === 'true') {
@@ -341,7 +347,7 @@ export function renderDirectVideoHtml(
       };
 
       const enterBufferGate = () => {
-        if (gatePaused || userPaused || video.ended || streamEnded) return;
+        if (holdingForIntro || gatePaused || userPaused || video.ended || streamEnded) return;
         gatePaused = true;
         gateStartedAt = Date.now();
         showSpinner();
@@ -353,7 +359,7 @@ export function renderDirectVideoHtml(
       };
 
       const safePlay = () => {
-        if (playPending || userPaused || gatePaused) return;
+        if (holdingForIntro || playPending || userPaused || gatePaused) return;
         playPending = true;
         const p = video.play();
         if (p && typeof p.then === 'function') {
@@ -442,6 +448,18 @@ export function renderDirectVideoHtml(
       window.addEventListener('message', (ev) => {
         const d = ev && ev.data;
         if (!d || typeof d !== 'object') return;
+        if (d.type === 'LOVEFLIX_END_INTRO') {
+          if (holdingForIntro) {
+            holdingForIntro = false;
+            if (getBufferedAhead() >= MIN_START_BUFFER_SEC || streamEnded) {
+              initialCushionDone = true;
+            }
+            if (!userPaused) {
+              safePlay();
+            }
+          }
+          return;
+        }
         if (d.type === 'LOVEFLIX_PLAYER_GET_STATE') {
           postToParent({
             type: 'LOVEFLIX_PLAYER_STATE',
