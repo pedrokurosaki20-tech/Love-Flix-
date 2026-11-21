@@ -52,7 +52,14 @@ export const StreamingPlayerModal: React.FC = () => {
     returnToExternalRoomApp,
     isApplyingRemoteMediaChange,
   } = useExternalRoom();
-  const { pushToast } = useUserData();
+  const { pushToast, profile } = useUserData();
+
+  const preferredAudio: 'pt' | 'original' = profile.audioLanguage === 'original' ? 'original' : 'pt';
+  const preferredSubtitles: 'auto' | 'always' | 'off' =
+    profile.subtitlePreference === 'always' || profile.subtitlePreference === 'off'
+      ? profile.subtitlePreference
+      : 'auto';
+  const preferredQuality: 'auto' | '1080p' | '720p' | 'saver' = profile.playbackQuality || 'auto';
 
   const [prefetchedImdb, setPrefetchedImdb] = useState<string | null>(null);
   const [resolvingImdb, setResolvingImdb] = useState(false);
@@ -698,7 +705,7 @@ export const StreamingPlayerModal: React.FC = () => {
   // 1. FULLSCREEN IN-APP SUPERCDN PLAYER (100% Viewport + Native Fullscreen)
   // ==========================================================================
   if (activePlayer) {
-    const streamIdentityKey = `${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}`;
+    const streamIdentityKey = `${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.channel}-${activePlayer.season || 0}-${activePlayer.episode || 0}-${preferredAudio}-${preferredSubtitles}-${preferredQuality}`;
     if (waitIntroStreamKeyRef.current !== streamIdentityKey) {
       waitIntroStreamKeyRef.current = streamIdentityKey;
       waitIntroFlagRef.current = activePlayer.channel === 1 && effectiveIsPlayingIntro;
@@ -710,6 +717,9 @@ export const StreamingPlayerModal: React.FC = () => {
       imdb: activePlayer.imdbId || '',
       tmdbId: String(activePlayer.id),
       channel: String(activePlayer.channel),
+      audioPref: preferredAudio,
+      subPref: preferredSubtitles,
+      qualityPref: preferredQuality,
     });
     if (superCdnType === 'tvshow') {
       streamParams.set('season', String(activePlayer.season || 1));

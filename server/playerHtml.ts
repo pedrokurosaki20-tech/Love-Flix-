@@ -279,6 +279,59 @@ export function renderDirectVideoHtml(
       let isInitialAutoplay = true;
       let pendingRemoteState = null;
       let holdingForIntro = false;
+      let activeHls = null;
+      let audioPref = 'pt';
+      let subPref = 'auto';
+      let qualityPref = 'auto';
+
+      const isPortugueseAudioTrack = (track) => {
+        const s = (
+          ((track && track.lang) || '') +
+          ' ' +
+          ((track && track.name) || '')
+        ).toLowerCase();
+        return (
+          /\b(por|pt|pt-br)\b/.test(s) ||
+          s.includes('portug') ||
+          s.includes('dublado') ||
+          s.includes('brasil')
+        );
+      };
+
+      const syncSubtitleTrackMode = () => {
+        const textTracks = video.textTracks;
+        if (!textTracks || textTracks.length === 0) return;
+        if (subPref === 'off') {
+          for (let i = 0; i < textTracks.length; i++) {
+            textTracks[i].mode = 'disabled';
+          }
+          return;
+        }
+        let activeAudioIsPt = audioPref === 'pt';
+        if (activeHls && Array.isArray(activeHls.audioTracks) && activeHls.audioTracks.length > 0) {
+          const curTrack = activeHls.audioTracks[activeHls.audioTrack];
+          if (curTrack) {
+            activeAudioIsPt = isPortugueseAudioTrack(curTrack);
+          }
+        }
+        const shouldShow = subPref === 'always' || (subPref === 'auto' && !activeAudioIsPt);
+        let ptTrackIndex = -1;
+        for (let i = 0; i < textTracks.length; i++) {
+          const meta = (
+            (textTracks[i].language || '') +
+            ' ' +
+            (textTracks[i].label || '')
+          ).toLowerCase();
+          if (meta.includes('pt') || meta.includes('por') || meta.includes('portug')) {
+            ptTrackIndex = i;
+            break;
+          }
+        }
+        const targetSubIdx = ptTrackIndex >= 0 ? ptTrackIndex : 0;
+        for (let i = 0; i < textTracks.length; i++) {
+          textTracks[i].mode = shouldShow && i === targetSubIdx ? 'showing' : 'disabled';
+        }
+      };
 
       const postToParent = (payload) => {
         try {
@@ -299,6 +352,10 @@ export function renderDirectVideoHtml(
 
       try {
         const initParams = new URLSearchParams(window.location.search);
+        audioPref = initParams.get('audioPref') === 'original' ? 'original' : 'pt';
+        const rawSubPref = initParams.get('subPref');
+        subPref = rawSubPref === 'always' || rawSubPref === 'off' ? rawSubPref : 'auto';
+        qualityPref = initParams.get('qualityPref') || 'auto';
         if (initParams.get('waitIntro') === '1') {
           holdingForIntro = true;
           video.autoplay = false;
@@ -479,6 +536,7 @@ export function renderDirectVideoHtml(
       });
 
       video.addEventListener('loadedmetadata', () => {
+        syncSubtitleTrackMode();
         postToParent({
           type: 'LOVEFLIX_PLAYER_READY',
           duration: Number.isFinite(video.duration) ? video.duration : 0,
@@ -836,6 +894,7 @@ export function renderDirectVideoHtml(
           },
         });
 
+        activeHls = hls;
         let initialAudioSelected = false;
 
         const renderAudioButtons = () => {
@@ -866,26 +925,52 @@ export function renderDirectVideoHtml(
           audioBar.classList.add('visible');
         };
 
-        const preferPortugueseTrack = () => {
+        const applyPreferredAudioTrack = () => {
           const list = hls.audioTracks || [];
-          if (!initialAudioSelected && list.length > 1) {
-            const ptIdx = list.findIndex((t) => {
-              const s = ((t.lang || '') + ' ' + (t.name || '')).toLowerCase();
-              return s.includes('por') || s.includes('portug') || s === 'pt';
-            });
-            if (ptIdx >= 0 && hls.audioTrack !== ptIdx) {
-              hls.audioTrack = ptIdx;
+          if (!initialAudioSelected && list.length > 0) {
+            if (list.length > 1) {
+              const targetIdx =
+                audioPref === 'original'
+                  ? list.findIndex((t) => !isPortugueseAudioTrack(t))
+                  : list.findIndex((t) => isPortugueseAudioTrack(t));
+              if (targetIdx >= 0 && hls.audioTrack !== targetIdx) {
+                hls.audioTrack = targetIdx;
+              }
             }
             initialAudioSelected = true;
           }
           renderAudioButtons();
+          syncSubtitleTrackMode();
+        };
+
+        const applyPreferredQualityCap = () => {
+          const levels = hls.levels || [];
+          if (!levels.length) return;
+          if (qualityPref === '720p' || qualityPref === 'saver') {
+            const maxH = qualityPref === 'saver' ? 480 : 720;
+            let bestCapIdx = -1;
+            let bestHeight = -1;
+            levels.forEach((lvl, idx) => {
+              const h = Number(lvl && lvl.height) || 0;
+              if (h > 0 && h <= maxH && h > bestHeight) {
+                bestHeight = h;
+                bestCapIdx = idx;
+              }
+            });
+            if (bestCapIdx >= 0) {
+              hls.autoLevelCapping = bestCapIdx;
+            } else if (qualityPref === 'saver') {
+              hls.autoLevelCapping = 0;
+            }
+          }
         };
 
         hls.loadSource(src);
         hls.attachMedia(video);
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
-          preferPortugueseTrack();
+          applyPreferredQualityCap();
+          applyPreferredAudioTrack();
           safePlay();
         });
 
@@ -913,8 +998,11 @@ export function renderDirectVideoHtml(
           evaluateBufferGate();
         });
 
-        hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, preferPortugueseTrack);
-        hls.on(window.Hls.Events.AUDIO_TRACK_SWITCHED, renderAudioButtons);
+        hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, applyPreferredAudioTrack);
+        hls.on(window.Hls.Events.AUDIO_TRACK_SWITCHED, () => {
+          renderAudioButtons();
+          syncSubtitleTrackMode();
+        });
 
         let fatalRecoverAttempts = 0;
         hls.on(window.Hls.Events.ERROR, (_ev, data) => {

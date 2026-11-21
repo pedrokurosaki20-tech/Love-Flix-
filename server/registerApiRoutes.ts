@@ -368,6 +368,7 @@ export function registerApiRoutes(app: Express): void {
       const channel: 1 | 2 | 3 = rawChannel === 2 ? 2 : rawChannel === 3 ? 3 : 1;
       const warmOnly = req.query.warm === '1';
       const allowFallback = req.query.nofallback !== '1';
+      const audioPref = req.query.audioPref === 'original' ? 'original' : 'pt';
 
       if (!/^tt\d{4,12}$/i.test(imdb) && !tmdbId) {
         if (warmOnly) {
@@ -395,6 +396,7 @@ export function registerApiRoutes(app: Express): void {
         channel,
         warmOnly,
         allowFallback,
+        audioPref,
       });
 
       if (warmOnly) {
@@ -525,7 +527,8 @@ export function registerApiRoutes(app: Express): void {
       }
 
       if (kind === 'manifest') {
-        const manifest = await getOrFetchRewrittenManifest(targetUrl, origin);
+        const audioPref = req.query.ap === 'original' ? 'original' : 'pt';
+        const manifest = await getOrFetchRewrittenManifest(targetUrl, origin, audioPref);
         if (!manifest) {
           res.status(502).end();
           return;

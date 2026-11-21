@@ -4,6 +4,7 @@ import {
   FALLBACK_SERVER_KEY,
   buildHlsProxyPath,
   warmInitialHlsStream,
+  type AudioLanguagePreference,
   type SubtitleTrackItem,
 } from './hlsEngine.js';
 import {
@@ -48,7 +49,9 @@ interface ResolvedProviderOption {
 }
 
 interface TitleProvidersMap {
-  slot1: ResolvedProviderOption | null;
+  slot1Dublado: ResolvedProviderOption | null;
+  slot1Original: ResolvedProviderOption | null;
+  slot1Fallback: ResolvedProviderOption | null;
   slot2Url: string;
   slot3Url: string;
   hasExplicitSuperFlix: boolean;
@@ -395,12 +398,15 @@ async function resolveAllTitleProviders(params: {
     ).filter((item): item is ResolvedProviderOption => item !== null);
 
     // Deterministic Channel Assignment:
-    // Canal 1 -> Native SuperCDN / FirePlayer HLS
-    let slot1 = resolvedOptions.find((o) => isNativeCdnProvider(o.url, o.host)) || null;
-    if (!slot1) {
+    // Canal 1 -> Native SuperCDN / FirePlayer HLS (separate Dublado and Original options)
+    const nativeOptions = resolvedOptions.filter((o) => isNativeCdnProvider(o.url, o.host));
+    const slot1Dublado = nativeOptions.find((o) => o.isDublado) || null;
+    const slot1Original = nativeOptions.find((o) => !o.isDublado) || null;
+    let slot1Fallback: ResolvedProviderOption | null = null;
+    if (!slot1Dublado && !slot1Original) {
       if (type === 'movie' && (hasValidImdb || tmdbId)) {
         const movieRef = hasValidImdb ? imdb : tmdbId;
-        slot1 = {
+        slot1Fallback = {
           videoId: 'fallback-vaiquecol',
           url: `https://vaiquecol.com/embed2/${movieRef}`,
           captionUrl: null,
@@ -409,7 +415,7 @@ async function resolveAllTitleProviders(params: {
         };
       } else if (type === 'tvshow' && (tmdbId || hasValidImdb)) {
         const seriesRef = tmdbId || imdb;
-        slot1 = {
+        slot1Fallback = {
           videoId: 'fallback-vaiquecol',
           url: `https://vaiquecol.com/embed2/${seriesRef}-${season}-${episode}`,
           captionUrl: null,
@@ -454,7 +460,9 @@ async function resolveAllTitleProviders(params: {
     }
 
     const mapped: TitleProvidersMap = {
-      slot1,
+      slot1Dublado,
+      slot1Original,
+      slot1Fallback,
       slot2Url,
       slot3Url,
       hasExplicitSuperFlix: Boolean(superFlixOption),
@@ -473,6 +481,16 @@ async function resolveAllTitleProviders(params: {
   }
 }
 
+function pickSlot1Option(
+  providers: TitleProvidersMap,
+  audioPref: AudioLanguagePreference
+): ResolvedProviderOption | null {
+  if (audioPref === 'original') {
+    return providers.slot1Original || providers.slot1Dublado || providers.slot1Fallback;
+  }
+  return providers.slot1Dublado || providers.slot1Original || providers.slot1Fallback;
+}
+
 export async function resolveSuperCdnChannel(params: {
   type: 'movie' | 'tvshow';
   imdb: string;
@@ -481,13 +499,17 @@ export async function resolveSuperCdnChannel(params: {
   episode: string;
   channel: 1 | 2 | 3;
   warmOnly?: boolean;
+  audioPref?: AudioLanguagePreference;
 }): Promise<SuperCdnResolvedEntry> {
   const { type, imdb, tmdbId, season, episode, channel, warmOnly } = params;
-  const cacheKey = `${type}:${imdb || 'noimdb'}:${tmdbId || ''}:${season}:${episode}:${channel}`;
+  const audioPref: AudioLanguagePreference = params.audioPref === 'original' ? 'original' : 'pt';
+  const cacheKey = `${type}:${imdb || 'noimdb'}:${tmdbId || ''}:${season}:${episode}:${channel}:${
+    channel === 1 ? audioPref : 'pt'
+  }`;
   const cached = superCdnStreamCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     if (warmOnly && cached.masterHlsUrl && cached.embedOrigin) {
-      await warmInitialHlsStream(cached.masterHlsUrl, cached.embedOrigin, true);
+      await warmInitialHlsStream(cached.masterHlsUrl, cached.embedOrigin, true, audioPref);
     }
     return cached;
   }
@@ -590,7 +612,7 @@ export async function resolveSuperCdnChannel(params: {
     }
 
     // Channel 1 — Native SuperCDN / FirePlayer HLS
-    const slot1 = providers.slot1;
+    const slot1 = pickSlot1Option(providers, audioPref);
     if (!slot1 || !slot1.url) {
       return {
         kind: 'html',
@@ -749,7 +771,12 @@ export async function resolveSuperCdnChannel(params: {
 
                 const masterHlsUrl = (videoJson?.videoSource || videoJson?.securedLink || '').trim();
                 if (masterHlsUrl && /^https?:\/\//i.test(masterHlsUrl)) {
-                  const proxiedMasterPath = buildHlsProxyPath(masterHlsUrl, embedOrigin, 'manifest');
+                  const proxiedMasterPath = buildHlsProxyPath(
+                    masterHlsUrl,
+                    embedOrigin,
+                    'manifest',
+                    audioPref
+                  );
                   const playerHtml = renderDirectVideoHtml(proxiedMasterPath, subtitleTracks, null);
                   const entry: SuperCdnResolvedEntry = {
                     kind: 'html',
@@ -764,9 +791,9 @@ export async function resolveSuperCdnChannel(params: {
                   superCdnStreamCache.set(cacheKey, entry);
 
                   if (warmOnly) {
-                    await warmInitialHlsStream(masterHlsUrl, embedOrigin, true);
+                    await warmInitialHlsStream(masterHlsUrl, embedOrigin, true, audioPref);
                   } else {
-                    void warmInitialHlsStream(masterHlsUrl, embedOrigin, false);
+                    void warmInitialHlsStream(masterHlsUrl, embedOrigin, false, audioPref);
                   }
 
                   return entry;
@@ -891,7 +918,7 @@ export async function checkTitleChannelAvailability(params: {
     });
 
     const [ch1Entry, sfStatus, sbAvailable, episodeReleased] = await Promise.all([
-      providers.slot1
+      providers.slot1Dublado || providers.slot1Original || providers.slot1Fallback
         ? resolveSuperCdnChannel({
             type,
             imdb,
@@ -976,6 +1003,7 @@ export async function resolveStreamWithFallback(params: {
   channel: 1 | 2 | 3;
   warmOnly?: boolean;
   allowFallback?: boolean;
+  audioPref?: AudioLanguagePreference;
 }): Promise<SuperCdnResolvedEntry> {
   const primary = await resolveSuperCdnChannel(params);
   if (primary.available || params.warmOnly || params.allowFallback === false) {

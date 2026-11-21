@@ -131,10 +131,13 @@ export function verifyHlsProxySignature(
   }
 }
 
+export type AudioLanguagePreference = 'pt' | 'original';
+
 export function buildHlsProxyPath(
   targetUrl: string,
   origin: string,
-  kind: 'manifest' | 'segment' | 'subtitle'
+  kind: 'manifest' | 'segment' | 'subtitle',
+  audioPref: AudioLanguagePreference = 'pt'
 ): string {
   const sig = signHlsProxyTarget(targetUrl, origin, kind);
   const params = new URLSearchParams({
@@ -143,21 +146,32 @@ export function buildHlsProxyPath(
     o: origin,
     s: sig,
   });
+  if (kind === 'manifest' && audioPref === 'original') {
+    params.set('ap', 'original');
+  }
   return `/api/supercdn/hls-proxy?${params.toString()}`;
+}
+
+function isPtAudioManifestLine(line: string): boolean {
+  return (
+    /LANGUAGE="(por|pt|pt-BR)"/i.test(line) ||
+    /NAME="[^"]*(Portug|Dublado|Brasil)/i.test(line)
+  );
 }
 
 export function rewriteHlsManifest(
   manifestText: string,
   manifestUrl: string,
-  origin: string
+  origin: string,
+  audioPref: AudioLanguagePreference = 'pt'
 ): string {
   const rawLines = manifestText.split(/\r?\n/);
-  const hasPortugueseAudio = rawLines.some(
-    (line) =>
-      line.startsWith('#EXT-X-MEDIA:') &&
-      /TYPE=AUDIO/i.test(line) &&
-      (/LANGUAGE="(por|pt|pt-BR)"/i.test(line) || /NAME="[^"]*(Portug|Dublado|Brasil)/i.test(line))
+  const audioLines = rawLines.filter(
+    (line) => line.startsWith('#EXT-X-MEDIA:') && /TYPE=AUDIO/i.test(line)
   );
+  const hasPortugueseAudio = audioLines.some((line) => isPtAudioManifestLine(line));
+  const hasOriginalAudio = audioLines.some((line) => !isPtAudioManifestLine(line));
+  let selectedOriginalAlready = false;
 
   let nextBareUrlIsVariant = false;
 
@@ -174,22 +188,38 @@ export function rewriteHlsManifest(
 
       let updatedTag = line;
 
-      if (hasPortugueseAudio && trimmed.startsWith('#EXT-X-MEDIA:') && /TYPE=AUDIO/i.test(trimmed)) {
-        const isPt =
-          /LANGUAGE="(por|pt|pt-BR)"/i.test(trimmed) ||
-          /NAME="[^"]*(Portug|Dublado|Brasil)/i.test(trimmed);
-        if (isPt) {
-          updatedTag = updatedTag.replace(/DEFAULT=NO/gi, 'DEFAULT=YES');
-          if (!/DEFAULT=/i.test(updatedTag)) {
-            updatedTag += ',DEFAULT=YES';
+      if (trimmed.startsWith('#EXT-X-MEDIA:') && /TYPE=AUDIO/i.test(trimmed)) {
+        const isPt = isPtAudioManifestLine(trimmed);
+        const shouldPreferThis =
+          audioPref === 'original'
+            ? hasOriginalAudio
+              ? !isPt && !selectedOriginalAlready
+              : isPt
+            : hasPortugueseAudio
+            ? isPt
+            : false;
+
+        if (shouldPreferThis && audioPref === 'original' && !isPt) {
+          selectedOriginalAlready = true;
+        }
+
+        if (
+          (audioPref === 'pt' && hasPortugueseAudio) ||
+          (audioPref === 'original' && hasOriginalAudio)
+        ) {
+          if (shouldPreferThis) {
+            updatedTag = updatedTag.replace(/DEFAULT=NO/gi, 'DEFAULT=YES');
+            if (!/DEFAULT=/i.test(updatedTag)) {
+              updatedTag += ',DEFAULT=YES';
+            }
+            updatedTag = updatedTag.replace(/AUTOSELECT=NO/gi, 'AUTOSELECT=YES');
+            if (!/AUTOSELECT=/i.test(updatedTag)) {
+              updatedTag += ',AUTOSELECT=YES';
+            }
+          } else {
+            updatedTag = updatedTag.replace(/DEFAULT=YES/gi, 'DEFAULT=NO');
+            updatedTag = updatedTag.replace(/AUTOSELECT=YES/gi, 'AUTOSELECT=NO');
           }
-          updatedTag = updatedTag.replace(/AUTOSELECT=NO/gi, 'AUTOSELECT=YES');
-          if (!/AUTOSELECT=/i.test(updatedTag)) {
-            updatedTag += ',AUTOSELECT=YES';
-          }
-        } else {
-          updatedTag = updatedTag.replace(/DEFAULT=YES/gi, 'DEFAULT=NO');
-          updatedTag = updatedTag.replace(/AUTOSELECT=YES/gi, 'AUTOSELECT=NO');
         }
       }
 
@@ -202,7 +232,7 @@ export function rewriteHlsManifest(
         updatedTag = updatedTag.replace(/URI="([^"]+)"/gi, (_full, rawUri: string) => {
           try {
             const absUrl = new URL(rawUri.trim(), manifestUrl).toString();
-            return `URI="${buildHlsProxyPath(absUrl, origin, childKind)}"`;
+            return `URI="${buildHlsProxyPath(absUrl, origin, childKind, audioPref)}"`;
           } catch {
             return _full;
           }
@@ -217,7 +247,7 @@ export function rewriteHlsManifest(
 
     try {
       const absUrl = new URL(trimmed, manifestUrl).toString();
-      return buildHlsProxyPath(absUrl, origin, lineKind);
+      return buildHlsProxyPath(absUrl, origin, lineKind, audioPref);
     } catch {
       return line;
     }
@@ -318,9 +348,10 @@ function indexMediaPlaylistSegments(
 
 export async function getOrFetchRewrittenManifest(
   targetUrl: string,
-  origin: string
+  origin: string,
+  audioPref: AudioLanguagePreference = 'pt'
 ): Promise<{ body: string; isVod: boolean; rawText?: string } | null> {
-  const cacheKey = `${origin}|${targetUrl}`;
+  const cacheKey = `${origin}|${audioPref}|${targetUrl}`;
   const cached = hlsManifestCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return { body: cached.body, isVod: cached.isVod };
@@ -343,7 +374,7 @@ export async function getOrFetchRewrittenManifest(
   if (!text.trimStart().startsWith('#EXTM3U')) return null;
 
   const isVod = text.includes('#EXT-X-ENDLIST');
-  const rewritten = rewriteHlsManifest(text, targetUrl, origin);
+  const rewritten = rewriteHlsManifest(text, targetUrl, origin, audioPref);
 
   indexMediaPlaylistSegments(cacheKey, text, targetUrl, origin);
 
@@ -439,10 +470,11 @@ export function triggerServerReadAhead(targetUrl: string, origin: string): void 
 export async function warmInitialHlsStream(
   masterHlsUrl: string,
   origin: string,
-  awaitPlaylistsOnly = false
+  awaitPlaylistsOnly = false,
+  audioPref: AudioLanguagePreference = 'pt'
 ): Promise<void> {
   try {
-    const master = await getOrFetchRewrittenManifest(masterHlsUrl, origin);
+    const master = await getOrFetchRewrittenManifest(masterHlsUrl, origin, audioPref);
     if (!master) return;
 
     let rawMaster = master.rawText || '';
@@ -464,7 +496,7 @@ export async function warmInitialHlsStream(
 
     const lines = rawMaster.split(/\r?\n/);
     let ptAudioPlaylistUrl = '';
-    let fallbackAudioPlaylistUrl = '';
+    let origAudioPlaylistUrl = '';
     let firstVideoVariantUrl = '';
 
     for (let i = 0; i < lines.length; i++) {
@@ -475,13 +507,10 @@ export async function warmInitialHlsStream(
         const uriMatch = trimmed.match(/URI="([^"]+)"/i);
         if (uriMatch?.[1]) {
           const absAudio = new URL(uriMatch[1], masterHlsUrl).toString();
-          if (
-            /LANGUAGE="(por|pt|pt-BR)"/i.test(trimmed) ||
-            /NAME="[^"]*(Portug|Dublado|Brasil)/i.test(trimmed)
-          ) {
-            ptAudioPlaylistUrl = absAudio;
-          } else if (!fallbackAudioPlaylistUrl) {
-            fallbackAudioPlaylistUrl = absAudio;
+          if (isPtAudioManifestLine(trimmed)) {
+            if (!ptAudioPlaylistUrl) ptAudioPlaylistUrl = absAudio;
+          } else if (!origAudioPlaylistUrl) {
+            origAudioPlaylistUrl = absAudio;
           }
         }
       } else if (!trimmed.startsWith('#') && !firstVideoVariantUrl) {
@@ -489,25 +518,30 @@ export async function warmInitialHlsStream(
       }
     }
 
-    const chosenAudioUrl = ptAudioPlaylistUrl || fallbackAudioPlaylistUrl;
+    const chosenAudioUrl =
+      audioPref === 'original'
+        ? origAudioPlaylistUrl || ptAudioPlaylistUrl
+        : ptAudioPlaylistUrl || origAudioPlaylistUrl;
     await Promise.all([
       firstVideoVariantUrl
-        ? getOrFetchRewrittenManifest(firstVideoVariantUrl, origin)
+        ? getOrFetchRewrittenManifest(firstVideoVariantUrl, origin, audioPref)
         : Promise.resolve(null),
       chosenAudioUrl
-        ? getOrFetchRewrittenManifest(chosenAudioUrl, origin)
+        ? getOrFetchRewrittenManifest(chosenAudioUrl, origin, audioPref)
         : Promise.resolve(null),
     ]);
 
     const initialSegments: string[] = [];
     if (chosenAudioUrl) {
-      const audioIndexed = playlistSegmentsIndex.get(`${origin}|${chosenAudioUrl}`);
+      const audioIndexed = playlistSegmentsIndex.get(`${origin}|${audioPref}|${chosenAudioUrl}`);
       if (audioIndexed) {
         initialSegments.push(...audioIndexed.segments.slice(0, 2));
       }
     }
     if (firstVideoVariantUrl) {
-      const videoIndexed = playlistSegmentsIndex.get(`${origin}|${firstVideoVariantUrl}`);
+      const videoIndexed = playlistSegmentsIndex.get(
+        `${origin}|${audioPref}|${firstVideoVariantUrl}`
+      );
       if (videoIndexed) {
         initialSegments.push(...videoIndexed.segments.slice(0, 10));
       }
