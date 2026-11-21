@@ -198,7 +198,11 @@ async function resolveAllTitleProviders(params: {
   season: string;
   episode: string;
 }): Promise<TitleProvidersMap> {
-  const { type, imdb, tmdbId, season, episode } = params;
+  const { type, tmdbId, season, episode } = params;
+  let imdb = (params.imdb || '').trim();
+  if (!/^tt\d{4,12}$/i.test(imdb) && tmdbId) {
+    imdb = await resolveTmdbImdbId(type === 'tvshow' ? 'tv' : 'movie', tmdbId);
+  }
   const hasValidImdb = /^tt\d{4,12}$/i.test(imdb);
   const mapKey = `${type}:${imdb || 'noimdb'}:${season}:${episode}:${tmdbId || ''}`;
   const cached = titleProvidersCache.get(mapKey);
@@ -501,7 +505,11 @@ export async function resolveSuperCdnChannel(params: {
   warmOnly?: boolean;
   audioPref?: AudioLanguagePreference;
 }): Promise<SuperCdnResolvedEntry> {
-  const { type, imdb, tmdbId, season, episode, channel, warmOnly } = params;
+  const { type, tmdbId, season, episode, channel, warmOnly } = params;
+  let imdb = (params.imdb || '').trim();
+  if (!/^tt\d{4,12}$/i.test(imdb) && tmdbId) {
+    imdb = await resolveTmdbImdbId(type === 'tvshow' ? 'tv' : 'movie', tmdbId);
+  }
   const audioPref: AudioLanguagePreference = params.audioPref === 'original' ? 'original' : 'pt';
   const cacheKey = `${type}:${imdb || 'noimdb'}:${tmdbId || ''}:${season}:${episode}:${channel}:${
     channel === 1 ? audioPref : 'pt'
@@ -883,7 +891,11 @@ export async function checkTitleChannelAvailability(params: {
   season: string;
   episode: string;
 }): Promise<ChannelAvailabilityReport> {
-  const { type, imdb, tmdbId, season, episode } = params;
+  const { type, tmdbId, season, episode } = params;
+  let imdb = (params.imdb || '').trim();
+  if (!/^tt\d{4,12}$/i.test(imdb) && tmdbId) {
+    imdb = await resolveTmdbImdbId(type === 'tvshow' ? 'tv' : 'movie', tmdbId);
+  }
   const key = `${type}:${imdb || 'noimdb'}:${tmdbId || ''}:${season}:${episode}`;
   const cached = availabilityCache.get(key);
   if (cached && cached.expiresAt > Date.now()) {
