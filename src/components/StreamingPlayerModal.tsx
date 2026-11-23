@@ -20,6 +20,11 @@ import { useExternalRoom } from '../context/ExternalRoomContext';
 import { useUserData } from '../context/UserDataContext';
 import { isCinemaOnlyMovie, tmdbService } from '../services/tmdb';
 import type { ExternalPlaybackAction } from '../types/externalRoom';
+import {
+  computeNormalizedElementBounds,
+  isAndroidNativeCanal2Available,
+  resolveCanal2DirectStream,
+} from '../utils/nativeBridge';
 
 const OFFICIAL_LOVEFLIX_INTRO_VIDEO = '/assets/aistudio/lv_0_20261031073011_3b9bb1a5.mp4';
 
@@ -87,8 +92,10 @@ export const StreamingPlayerModal: React.FC = () => {
   const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
 
   const playerScreenRef = useRef<HTMLDivElement | null>(null);
+  const videoStageRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nativeCanal2ActiveKeyRef = useRef<string | null>(null);
 
   // Official Love Flix Opening Intro State
   const [isPlayingIntro, setIsPlayingIntro] = useState(false);
@@ -740,7 +747,7 @@ export const StreamingPlayerModal: React.FC = () => {
     enterFullscreenElement(playerScreenRef.current);
   };
 
-  const handleClosePlayer = () => {
+  const handleClosePlayer = useCallback(() => {
     if (introVideoRef.current) {
       try {
         introVideoRef.current.pause();
@@ -748,13 +755,221 @@ export const StreamingPlayerModal: React.FC = () => {
         // ignore
       }
     }
+    try {
+      window.LoveFlixNative?.closeCanal2?.();
+    } catch {}
+    nativeCanal2ActiveKeyRef.current = null;
     setIsPlayingIntro(false);
     lastIntroContentKeyRef.current = null;
     waitIntroStreamKeyRef.current = null;
     waitIntroFlagRef.current = false;
     exitNativeFullscreenIfActive();
     closePlayerSession();
-  };
+  }, [closePlayerSession, exitNativeFullscreenIfActive]);
+
+  const useNativeCanal2 = Boolean(
+    activePlayer &&
+      activePlayer.channel === 2 &&
+      isAndroidNativeCanal2Available() &&
+      !activeIsCinemaExclusive &&
+      !(activeAvailableChannels !== null && activeAvailableChannels.length === 0)
+  );
+
+  const shouldShowNativeFloatingControls = useCallback(() => {
+    if (typeof window === 'undefined') return false;
+    const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+    const isFs = Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
+    const isLandscapeMobile = window.innerWidth > window.innerHeight && window.innerWidth < 1024;
+    return isFs || isLandscapeMobile;
+  }, []);
+
+  // Native Android Canal 2 Bridge: resolve direct SuperFlix URL and open dedicated native WebView
+  useEffect(() => {
+    if (!useNativeCanal2 || !activePlayer || resolvingActiveImdb) {
+      if (nativeCanal2ActiveKeyRef.current) {
+        try {
+          window.LoveFlixNative?.closeCanal2?.();
+        } catch {}
+        nativeCanal2ActiveKeyRef.current = null;
+      }
+      return;
+    }
+
+    const nativeKey = `${activePlayer.mediaType}-${activePlayer.id}-${activePlayer.imdbId || 'tmdb'}-${activePlayer.season || 0}-${activePlayer.episode || 0}-${preferredAudio}`;
+    const controller = new AbortController();
+    let cancelled = false;
+
+    setIframeLoading(true);
+
+    resolveCanal2DirectStream({
+      mediaType: activePlayer.mediaType,
+      id: activePlayer.id,
+      imdbId: activePlayer.imdbId,
+      season: activePlayer.season,
+      episode: activePlayer.episode,
+      audioPref: preferredAudio,
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        if (!res.available) {
+          const pool =
+            activeAvailableChannels && activeAvailableChannels.length > 0
+              ? activeAvailableChannels
+              : ([1, 3] as Array<1 | 2 | 3>);
+          const next = pool.find((c) => c !== 2);
+          setActiveAvailableChannels((prev) => (prev ? prev.filter((c) => c !== 2) : prev));
+          if (next) {
+            switchPlayerChannel(next);
+          } else {
+            setActiveAvailableChannels([]);
+          }
+          return;
+        }
+
+        if (res.resolvedChannel !== 2) {
+          switchPlayerChannel(res.resolvedChannel);
+          return;
+        }
+
+        if (!res.url) {
+          setIframeLoading(false);
+          return;
+        }
+
+        nativeCanal2ActiveKeyRef.current = nativeKey;
+        const bounds = computeNormalizedElementBounds(videoStageRef.current, {
+          visible: true,
+          showFloatingControls: shouldShowNativeFloatingControls(),
+        });
+        window.LoveFlixNative?.openCanal2?.(
+          res.url,
+          preferredAudio,
+          effectiveIsPlayingIntro,
+          JSON.stringify(bounds)
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setIframeLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [
+    useNativeCanal2,
+    activePlayer?.id,
+    activePlayer?.mediaType,
+    activePlayer?.imdbId,
+    activePlayer?.season,
+    activePlayer?.episode,
+    resolvingActiveImdb,
+    preferredAudio,
+    switchPlayerChannel,
+    shouldShowNativeFloatingControls,
+  ]);
+
+  // Keep Android Canal 2 WebView intro mute/visibility synchronized
+  useEffect(() => {
+    if (!useNativeCanal2) return;
+    try {
+      window.LoveFlixNative?.setCanal2IntroActive?.(effectiveIsPlayingIntro);
+    } catch {}
+  }, [useNativeCanal2, effectiveIsPlayingIntro]);
+
+  // Keep Android Canal 2 WebView bounds synced with #SuperCDNContainerVideo geometry
+  useEffect(() => {
+    if (!useNativeCanal2) return;
+    const syncBounds = () => {
+      const bounds = computeNormalizedElementBounds(videoStageRef.current, {
+        visible: true,
+        showFloatingControls: shouldShowNativeFloatingControls(),
+      });
+      try {
+        window.LoveFlixNative?.updateCanal2Bounds?.(JSON.stringify(bounds));
+      } catch {}
+    };
+
+    syncBounds();
+    const rafId = requestAnimationFrame(syncBounds);
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && videoStageRef.current) {
+      ro = new ResizeObserver(() => syncBounds());
+      ro.observe(videoStageRef.current);
+    }
+
+    window.addEventListener('resize', syncBounds);
+    window.addEventListener('orientationchange', syncBounds);
+    document.addEventListener('fullscreenchange', syncBounds);
+    document.addEventListener('webkitfullscreenchange', syncBounds);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro?.disconnect();
+      window.removeEventListener('resize', syncBounds);
+      window.removeEventListener('orientationchange', syncBounds);
+      document.removeEventListener('fullscreenchange', syncBounds);
+      document.removeEventListener('webkitfullscreenchange', syncBounds);
+    };
+  }, [useNativeCanal2, isNativeFullscreen, shouldShowNativeFloatingControls]);
+
+  // Handle callbacks dispatched from native Android Canal 2 WebView
+  useEffect(() => {
+    if (!useNativeCanal2 || !activePlayer) return;
+
+    const onVideoAlive = () => setIframeLoading(false);
+    const onChallengeVisible = () => setIframeLoading(false);
+    const onNativeClose = () => handleClosePlayer();
+    const onNativeToggleFs = () => handleToggleFullscreen();
+    const onNativeUnavailable = () => {
+      try {
+        window.LoveFlixNative?.closeCanal2?.();
+      } catch {}
+      nativeCanal2ActiveKeyRef.current = null;
+      const pool =
+        activeAvailableChannels && activeAvailableChannels.length > 0
+          ? activeAvailableChannels
+          : ([1, 3] as Array<1 | 2 | 3>);
+      const nextChannel = pool.find((c) => c !== 2);
+      setActiveAvailableChannels((prev) => (prev ? prev.filter((c) => c !== 2) : prev));
+      if (nextChannel) {
+        switchPlayerChannel(nextChannel);
+      } else {
+        setActiveAvailableChannels([]);
+      }
+    };
+
+    window.addEventListener('loveflix:canal2-video-alive', onVideoAlive);
+    window.addEventListener('loveflix:canal2-challenge-visible', onChallengeVisible);
+    window.addEventListener('loveflix:canal2-close', onNativeClose);
+    window.addEventListener('loveflix:canal2-toggle-fullscreen', onNativeToggleFs);
+    window.addEventListener('loveflix:canal2-unavailable', onNativeUnavailable);
+
+    return () => {
+      window.removeEventListener('loveflix:canal2-video-alive', onVideoAlive);
+      window.removeEventListener('loveflix:canal2-challenge-visible', onChallengeVisible);
+      window.removeEventListener('loveflix:canal2-close', onNativeClose);
+      window.removeEventListener('loveflix:canal2-toggle-fullscreen', onNativeToggleFs);
+      window.removeEventListener('loveflix:canal2-unavailable', onNativeUnavailable);
+    };
+  }, [
+    useNativeCanal2,
+    activePlayer,
+    activeAvailableChannels,
+    handleClosePlayer,
+    handleToggleFullscreen,
+    switchPlayerChannel,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        window.LoveFlixNative?.closeCanal2?.();
+      } catch {}
+    };
+  }, []);
 
   // ==========================================================================
   // 1. FULLSCREEN IN-APP SUPERCDN PLAYER (100% Viewport + Native Fullscreen)
@@ -784,11 +999,12 @@ export const StreamingPlayerModal: React.FC = () => {
       streamParams.set('waitIntro', '1');
     }
 
-    const streamSrc = !resolvingActiveImdb
+    const streamSrc = !resolvingActiveImdb && !useNativeCanal2
       ? `/api/supercdn/stream?${streamParams.toString()}`
       : null;
     const canPreloadBehindIntro = activePlayer.channel === 1 || activePlayer.channel === 2;
     const shouldMountIframe =
+      !useNativeCanal2 &&
       Boolean(streamSrc && streamSrc.trim()) &&
       (!effectiveIsPlayingIntro || canPreloadBehindIntro);
 
@@ -875,6 +1091,7 @@ export const StreamingPlayerModal: React.FC = () => {
         {/* SuperCDN Official Container (#SuperCDNContainerVideo) */}
         <div
           id="SuperCDNContainerVideo"
+          ref={videoStageRef}
           className="relative flex-1 w-full h-full min-h-0 bg-black flex items-center justify-center overflow-hidden"
         >
           {/* Official Love Flix Opening Video with Sound */}

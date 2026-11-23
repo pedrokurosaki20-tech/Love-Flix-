@@ -12,6 +12,66 @@
         android:background="@color/loveflix_bg"
         android:overScrollMode="never" />
 
+    <!-- Dedicated Native Canal 2 Player WebView (positioned dynamically over #SuperCDNContainerVideo) -->
+    <com.loveflix.app.Canal2ContainerLayout
+        android:id="@+id/canal2Container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:visibility="gone">
+
+        <WebView
+            android:id="@+id/canal2WebView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#000000"
+            android:overScrollMode="never" />
+
+        <FrameLayout
+            android:id="@+id/canal2FloatingControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:paddingStart="12dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="10dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/canal2CloseBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:layout_gravity="start|center_vertical"
+                android:background="@drawable/canal2_pill_bg"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:text="← Fechar"
+                android:textColor="@color/loveflix_white"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/canal2FullscreenBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:layout_gravity="end|center_vertical"
+                android:background="@drawable/canal2_pill_bg"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:text="Tela cheia"
+                android:textColor="@color/loveflix_white"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </FrameLayout>
+    </com.loveflix.app.Canal2ContainerLayout>
+
     <!-- Native Launch Animation Overlay shown on app startup -->
     <FrameLayout
         android:id="@+id/splashOverlay"

@@ -32,6 +32,11 @@ import {
 } from '../services/tmdb';
 import type { TMDBMediaItem, TMDBMediaDetail, TMDBEpisode } from '../types/tmdb';
 import { LOVEFLIX_PRESET_AVATARS } from '../utils/avatars';
+import {
+  computeNormalizedElementBounds,
+  isAndroidNativeCanal2Available,
+  resolveCanal2DirectStream,
+} from '../utils/nativeBridge';
 
 const OFFICIAL_LOVEFLIX_INTRO_VIDEO = '/assets/aistudio/lv_0_20261031073011_3b9bb1a5.mp4';
 
@@ -155,6 +160,7 @@ export const SessaoFlixPage: React.FC = () => {
   const videoStageRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const introVideoRef = useRef<HTMLVideoElement | null>(null);
+  const nativeRoomCanal2ActiveRef = useRef<boolean>(false);
   const lastIntroContentKeyRef = useRef<string | null>(null);
   const waitIntroStreamKeyRef = useRef<string | null>(null);
   const waitIntroFlagRef = useRef<boolean>(false);
@@ -1170,12 +1176,218 @@ export const SessaoFlixPage: React.FC = () => {
     setIframeLoading(true);
   }, [streamSrc]);
 
+  const useNativeRoomCanal2 = Boolean(
+    isConnected &&
+      roomId &&
+      syncedMedia &&
+      currentChannel === 2 &&
+      isAndroidNativeCanal2Available() &&
+      !activeIsCinemaExclusive &&
+      !(activeRoomChannels !== null && activeRoomChannels.length === 0)
+  );
+
+  // Native Android Canal 2 Bridge inside Sessão Flix
+  useEffect(() => {
+    if (!useNativeRoomCanal2 || !syncedMedia || resolvingRoomImdb) {
+      if (nativeRoomCanal2ActiveRef.current) {
+        try {
+          window.LoveFlixNative?.closeCanal2?.();
+        } catch {}
+        nativeRoomCanal2ActiveRef.current = false;
+      }
+      return;
+    }
+
+    const controller = new AbortController();
+    let cancelled = false;
+
+    setIframeLoading(true);
+
+    resolveCanal2DirectStream({
+      mediaType: syncedMedia.mediaType,
+      id: syncedMedia.tmdbId,
+      imdbId: effectiveRoomImdb,
+      season: syncedMedia.season,
+      episode: syncedMedia.episode,
+      audioPref: preferredAudio,
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        if (!res.available) {
+          const pool =
+            activeRoomChannels && activeRoomChannels.length > 0
+              ? activeRoomChannels
+              : ([1, 3] as Array<1 | 2 | 3>);
+          const nextChannel = pool.find((c) => c !== 2);
+          setActiveRoomChannels((prev) => (prev ? prev.filter((c) => c !== 2) : prev));
+          if (nextChannel) {
+            void handleSwitchRoomChannel(nextChannel);
+          } else {
+            setActiveRoomChannels([]);
+          }
+          return;
+        }
+
+        if (res.resolvedChannel !== 2) {
+          void handleSwitchRoomChannel(res.resolvedChannel);
+          return;
+        }
+
+        if (!res.url) {
+          setIframeLoading(false);
+          return;
+        }
+
+        nativeRoomCanal2ActiveRef.current = true;
+        const bounds = computeNormalizedElementBounds(videoStageRef.current, {
+          visible: !isParticipantsOpen,
+          showFloatingControls: isStageFullscreen,
+        });
+        window.LoveFlixNative?.openCanal2?.(
+          res.url,
+          preferredAudio,
+          effectiveIsPlayingIntro,
+          JSON.stringify(bounds)
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setIframeLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [
+    useNativeRoomCanal2,
+    syncedMedia?.tmdbId,
+    syncedMedia?.mediaType,
+    syncedMedia?.season,
+    syncedMedia?.episode,
+    effectiveRoomImdb,
+    resolvingRoomImdb,
+    preferredAudio,
+    handleSwitchRoomChannel,
+  ]);
+
+  useEffect(() => {
+    if (!useNativeRoomCanal2) return;
+    try {
+      window.LoveFlixNative?.setCanal2IntroActive?.(effectiveIsPlayingIntro);
+    } catch {}
+  }, [useNativeRoomCanal2, effectiveIsPlayingIntro]);
+
+  useEffect(() => {
+    if (!useNativeRoomCanal2) return;
+    const syncBounds = () => {
+      const bounds = computeNormalizedElementBounds(videoStageRef.current, {
+        visible: !isParticipantsOpen,
+        showFloatingControls: isStageFullscreen,
+      });
+      try {
+        window.LoveFlixNative?.updateCanal2Bounds?.(JSON.stringify(bounds));
+      } catch {}
+    };
+
+    syncBounds();
+    const rafId = requestAnimationFrame(syncBounds);
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && videoStageRef.current) {
+      ro = new ResizeObserver(() => syncBounds());
+      ro.observe(videoStageRef.current);
+    }
+
+    window.addEventListener('resize', syncBounds);
+    window.addEventListener('orientationchange', syncBounds);
+    document.addEventListener('fullscreenchange', syncBounds);
+    document.addEventListener('webkitfullscreenchange', syncBounds);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro?.disconnect();
+      window.removeEventListener('resize', syncBounds);
+      window.removeEventListener('orientationchange', syncBounds);
+      document.removeEventListener('fullscreenchange', syncBounds);
+      document.removeEventListener('webkitfullscreenchange', syncBounds);
+    };
+  }, [useNativeRoomCanal2, isParticipantsOpen, isStageFullscreen]);
+
+  useEffect(() => {
+    if (!useNativeRoomCanal2 || !syncedMedia) return;
+
+    const onVideoAlive = () => setIframeLoading(false);
+    const onChallengeVisible = () => setIframeLoading(false);
+    const onNativeToggleFs = () => toggleRoomStageFullscreen();
+    const onNativeClose = () => {
+      if (isStageFullscreen) {
+        toggleRoomStageFullscreen();
+        return;
+      }
+      try {
+        window.LoveFlixNative?.closeCanal2?.();
+      } catch {}
+      nativeRoomCanal2ActiveRef.current = false;
+      setIsParticipantsOpen(false);
+      disconnectExternalRoom();
+    };
+    const onNativeUnavailable = () => {
+      try {
+        window.LoveFlixNative?.closeCanal2?.();
+      } catch {}
+      nativeRoomCanal2ActiveRef.current = false;
+      const pool =
+        activeRoomChannels && activeRoomChannels.length > 0
+          ? activeRoomChannels
+          : ([1, 3] as Array<1 | 2 | 3>);
+      const nextChannel = pool.find((c) => c !== 2);
+      setActiveRoomChannels((prev) => (prev ? prev.filter((c) => c !== 2) : prev));
+      if (nextChannel) {
+        void handleSwitchRoomChannel(nextChannel);
+      } else {
+        setActiveRoomChannels([]);
+      }
+    };
+
+    window.addEventListener('loveflix:canal2-video-alive', onVideoAlive);
+    window.addEventListener('loveflix:canal2-challenge-visible', onChallengeVisible);
+    window.addEventListener('loveflix:canal2-toggle-fullscreen', onNativeToggleFs);
+    window.addEventListener('loveflix:canal2-close', onNativeClose);
+    window.addEventListener('loveflix:canal2-unavailable', onNativeUnavailable);
+
+    return () => {
+      window.removeEventListener('loveflix:canal2-video-alive', onVideoAlive);
+      window.removeEventListener('loveflix:canal2-challenge-visible', onChallengeVisible);
+      window.removeEventListener('loveflix:canal2-toggle-fullscreen', onNativeToggleFs);
+      window.removeEventListener('loveflix:canal2-close', onNativeClose);
+      window.removeEventListener('loveflix:canal2-unavailable', onNativeUnavailable);
+    };
+  }, [
+    useNativeRoomCanal2,
+    syncedMedia,
+    activeRoomChannels,
+    isStageFullscreen,
+    toggleRoomStageFullscreen,
+    disconnectExternalRoom,
+    handleSwitchRoomChannel,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        window.LoveFlixNative?.closeCanal2?.();
+      } catch {}
+    };
+  }, []);
+
   // =========================================================================
   // VIEW A: DEDICATED WATCH ROOM
   // =========================================================================
   if (isConnected && roomId) {
     const canPreloadBehindIntro = currentChannel === 1 || currentChannel === 2;
     const shouldMountIframe =
+      !useNativeRoomCanal2 &&
       Boolean(streamSrc && streamSrc.trim()) &&
       (!effectiveIsPlayingIntro || canPreloadBehindIntro);
     const noRoomChannelsAvailable =

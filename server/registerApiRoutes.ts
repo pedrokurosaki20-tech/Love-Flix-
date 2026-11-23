@@ -375,6 +375,10 @@ export function registerApiRoutes(app: Express): void {
           res.status(204).end();
           return;
         }
+        if (req.query.mode === 'json') {
+          res.status(200).json({ ok: false, available: false, resolvedChannel: channel, url: null });
+          return;
+        }
         res
           .status(400)
           .setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -409,6 +413,17 @@ export function registerApiRoutes(app: Express): void {
         return;
       }
 
+      if (req.query.mode === 'json') {
+        res.status(200).json({
+          ok: true,
+          kind: resolved.kind,
+          available: resolved.available,
+          resolvedChannel: resolved.resolvedChannel,
+          url: resolved.url || null,
+        });
+        return;
+      }
+
       if (resolved.kind === 'redirect' && resolved.url) {
         res.redirect(302, resolved.url);
         return;
@@ -425,8 +440,8 @@ export function registerApiRoutes(app: Express): void {
             )
         );
     } catch {
-      if (req.query.warm === '1') {
-        res.status(200).json({ ok: false });
+      if (req.query.warm === '1' || req.query.mode === 'json') {
+        res.status(200).json({ ok: false, available: false, url: null });
         return;
       }
       res
