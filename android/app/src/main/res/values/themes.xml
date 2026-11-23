@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Base.Theme.LoveFlix" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/loveflix_bg</item>
+        <item name="android:statusBarColor">@color/loveflix_bg</item>
+        <item name="android:navigationBarColor">@color/loveflix_bg</item>
+        <item name="android:colorPrimary">@color/loveflix_crimson</item>
+        <item name="android:colorPrimaryDark">@color/loveflix_bg</item>
+        <item name="android:colorAccent">@color/loveflix_crimson</item>
+    </style>
+
+    <style name="Theme.LoveFlix" parent="Base.Theme.LoveFlix" />
+</resources>

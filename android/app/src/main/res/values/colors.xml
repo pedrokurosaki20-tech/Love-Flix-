@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="loveflix_bg">#080808</color>
+    <color name="loveflix_surface">#121212</color>
+    <color name="loveflix_crimson">#E50914</color>
+    <color name="loveflix_white">#FFFFFF</color>
+    <color name="loveflix_muted">#A1A1A1</color>
+</resources>

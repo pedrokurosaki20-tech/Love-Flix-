@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Love Flix</string>
+    <string name="offline_title">Sem conexão</string>
+    <string name="offline_message">Não foi possível conectar à Love Flix. Verifique sua internet e tente novamente.</string>
+    <string name="offline_retry">Tentar novamente</string>
+    <string name="back_exit_prompt">Toque em voltar novamente para sair</string>
+</resources>
