@@ -4,6 +4,8 @@ import org.json.JSONObject
 
 object Canal2Automation {
 
+    const val WRAPPER_PATH_PREFIX = "https://love-flix.vercel.app/__canal2_wrapper"
+
     fun isAllowedCanal2Url(rawUrl: String?): Boolean {
         if (rawUrl.isNullOrBlank()) return false
         val lower = rawUrl.lowercase()
@@ -11,12 +13,18 @@ object Canal2Automation {
             lower.startsWith("http://superflixapi.")
     }
 
-    fun buildEmbedWrapperHtml(targetUrl: String): String {
+    fun buildEmbedWrapperHtml(
+        targetUrl: String,
+        initialAudioPref: String,
+        initialIntroActive: Boolean
+    ): String {
         val safeSrc = targetUrl
             .replace("&", "&amp;")
             .replace("\"", "&quot;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
+        val safeAudio = if (initialAudioPref == "original") "original" else "pt"
+        val introBool = if (initialIntroActive) "true" else "false"
 
         return """
             <!DOCTYPE html>
@@ -43,6 +51,68 @@ object Canal2Automation {
                   background: #000000;
                 }
               </style>
+              <script>
+                (function() {
+                  window.__LF_AUDIO_PREF = ${JSONObject.quote(safeAudio)};
+                  window.__LF_INTRO_PLAYING = $introBool;
+
+                  function pushStateToChildren() {
+                    var frames = document.querySelectorAll('iframe');
+                    for (var i = 0; i < frames.length; i++) {
+                      try {
+                        frames[i].contentWindow.postMessage({
+                          type: 'LF_CANAL2_STATE',
+                          introPlaying: !!window.__LF_INTRO_PLAYING,
+                          audioPref: window.__LF_AUDIO_PREF
+                        }, '*');
+                      } catch (e) {}
+                    }
+                  }
+
+                  window.__lfSetIntroState = function(active) {
+                    window.__LF_INTRO_PLAYING = !!active;
+                    pushStateToChildren();
+                  };
+
+                  window.__lfSetAudioPref = function(pref) {
+                    window.__LF_AUDIO_PREF = (pref === 'original') ? 'original' : 'pt';
+                    pushStateToChildren();
+                  };
+
+                  window.addEventListener('message', function(ev) {
+                    var d = ev && ev.data;
+                    if (!d || typeof d !== 'object') return;
+                    if (d.type === 'LF_CANAL2_QUERY_STATE') {
+                      try {
+                        ev.source && ev.source.postMessage({
+                          type: 'LF_CANAL2_STATE',
+                          introPlaying: !!window.__LF_INTRO_PLAYING,
+                          audioPref: window.__LF_AUDIO_PREF
+                        }, '*');
+                      } catch (e) {}
+                    } else if (d.type === 'LF_CANAL2_VIDEO_ALIVE') {
+                      try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onVideoAlive(); } catch (e) {}
+                      var sf = document.getElementById('sfFrame');
+                      try { sf && sf.contentWindow && sf.contentWindow.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
+                    } else if (d.type === 'LF_CANAL2_CHALLENGE_VISIBLE') {
+                      try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onChallengeVisible(); } catch (e) {}
+                    } else if (d.type === 'LF_CANAL2_UNAVAILABLE') {
+                      try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
+                    } else if (d.type === 'LF_CANAL2_IFRAME_ERROR') {
+                      var sf2 = document.getElementById('sfFrame');
+                      try { sf2 && sf2.contentWindow && sf2.contentWindow.postMessage({ type: 'LF_CANAL2_IFRAME_ERROR' }, '*'); } catch (e) {}
+                    }
+                  });
+
+                  document.addEventListener('DOMContentLoaded', function() {
+                    var sf = document.getElementById('sfFrame');
+                    if (sf) {
+                      sf.addEventListener('load', pushStateToChildren);
+                    }
+                    pushStateToChildren();
+                  });
+                })();
+              </script>
             </head>
             <body>
               <iframe
@@ -78,67 +148,23 @@ object Canal2Automation {
                         return;
                     }
 
+                    var isWrapperFrame = (window === window.top && host === 'love-flix.vercel.app');
+                    if (isWrapperFrame) {
+                        return;
+                    }
+
                     if (window.__lfCanal2Injected) {
                         return;
                     }
                     window.__lfCanal2Injected = true;
 
-                    var isWrapperFrame = (window === window.top && host === 'love-flix.vercel.app');
-                    var isControlFrame = (host.indexOf('superflixapi') !== -1);
+                    var isControlFrame =
+                        (host.indexOf('superflixapi') !== -1) ||
+                        (host.indexOf('superflix') !== -1) ||
+                        (window.parent === window.top);
 
                     window.__LF_AUDIO_PREF = ${JSONObject.quote(safeAudio)};
                     window.__LF_INTRO_PLAYING = $introBool;
-
-                    if (isWrapperFrame) {
-                        function pushStateToChildren() {
-                            var frames = document.querySelectorAll('iframe');
-                            for (var i = 0; i < frames.length; i++) {
-                                try {
-                                    frames[i].contentWindow.postMessage({
-                                        type: 'LF_CANAL2_STATE',
-                                        introPlaying: !!window.__LF_INTRO_PLAYING,
-                                        audioPref: window.__LF_AUDIO_PREF
-                                    }, '*');
-                                } catch (e) {}
-                            }
-                        }
-
-                        window.__lfSetIntroState = function(active) {
-                            window.__LF_INTRO_PLAYING = !!active;
-                            pushStateToChildren();
-                        };
-
-                        window.__lfSetAudioPref = function(pref) {
-                            window.__LF_AUDIO_PREF = (pref === 'original') ? 'original' : 'pt';
-                            pushStateToChildren();
-                        };
-
-                        window.addEventListener('message', function(ev) {
-                            var d = ev && ev.data;
-                            if (!d || typeof d !== 'object') return;
-                            if (d.type === 'LF_CANAL2_QUERY_STATE') {
-                                try {
-                                    ev.source && ev.source.postMessage({
-                                        type: 'LF_CANAL2_STATE',
-                                        introPlaying: !!window.__LF_INTRO_PLAYING,
-                                        audioPref: window.__LF_AUDIO_PREF
-                                    }, '*');
-                                } catch (e) {}
-                            } else if (d.type === 'LF_CANAL2_VIDEO_ALIVE') {
-                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onVideoAlive(); } catch (e) {}
-                                var sf = document.getElementById('sfFrame');
-                                try { sf && sf.contentWindow && sf.contentWindow.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
-                            } else if (d.type === 'LF_CANAL2_CHALLENGE_VISIBLE') {
-                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onChallengeVisible(); } catch (e) {}
-                            } else if (d.type === 'LF_CANAL2_UNAVAILABLE') {
-                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
-                            } else if (d.type === 'LF_CANAL2_IFRAME_ERROR') {
-                                var sf2 = document.getElementById('sfFrame');
-                                try { sf2 && sf2.contentWindow && sf2.contentWindow.postMessage({ type: 'LF_CANAL2_IFRAME_ERROR' }, '*'); } catch (e) {}
-                            }
-                        });
-                        return;
-                    }
 
                     // 1. Block popups / new tabs inside player and subframes
                     try {
@@ -146,10 +172,11 @@ object Canal2Automation {
                     } catch (e) {}
 
                     // 2. Inject CSS to hide SuperFlixAPI watermark/selo, episode list & ad overlays
-                    function injectCleanCss() {
+                    function injectCleanCss(targetDoc) {
+                        var doc = targetDoc || document;
                         try {
-                            if (document.getElementById('__lf_clean_css')) return;
-                            var style = document.createElement('style');
+                            if (!doc || doc.getElementById('__lf_clean_css')) return;
+                            var style = doc.createElement('style');
                             style.id = '__lf_clean_css';
                             style.textContent = [
                                 '[class*="watermark" i], [id*="watermark" i],',
@@ -165,7 +192,7 @@ object Canal2Automation {
                                 '  pointer-events: none !important;',
                                 '}'
                             ].join('\n');
-                            var target = document.head || document.documentElement;
+                            var target = doc.head || doc.documentElement;
                             if (target) target.appendChild(style);
                         } catch (e) {}
                     }
@@ -173,7 +200,11 @@ object Canal2Automation {
                     function isSuperFlixBadgeNode(el) {
                         if (!el || el.nodeType !== 1) return false;
                         var tag = (el.tagName || '').toUpperCase();
-                        if (tag === 'HTML' || tag === 'BODY' || tag === 'HEAD' || tag === 'SCRIPT' || tag === 'STYLE' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'IFRAME' || tag === 'BUTTON') {
+                        if (
+                            tag === 'HTML' || tag === 'BODY' || tag === 'HEAD' ||
+                            tag === 'SCRIPT' || tag === 'STYLE' || tag === 'VIDEO' ||
+                            tag === 'AUDIO' || tag === 'IFRAME' || tag === 'BUTTON'
+                        ) {
                             return false;
                         }
                         if (el.querySelector && (el.querySelector('video') || el.querySelector('iframe') || el.querySelector('button'))) {
@@ -184,7 +215,7 @@ object Canal2Automation {
                             return true;
                         }
                         var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-                        if (!txt || txt.length > 90) return false;
+                        if (!txt || txt.length > 120) return false;
                         return /um\s+oferecimento|oferecimento\s*:?\s*superflix|superflix\s*api|superflixapi/i.test(txt);
                     }
 
@@ -211,31 +242,84 @@ object Canal2Automation {
                         return isTransparent;
                     }
 
-                    function cleanBrandingAndOverlays(root) {
-                        injectCleanCss();
-                        var scope = root && root.querySelectorAll ? root : document;
-                        if (!scope || !scope.querySelectorAll) return;
+                    function hideNode(node) {
+                        if (!node || !node.style) return;
+                        node.style.setProperty('display', 'none', 'important');
+                        node.style.setProperty('opacity', '0', 'important');
+                        node.style.setProperty('visibility', 'hidden', 'important');
+                        node.style.setProperty('pointer-events', 'none', 'important');
+                        if (node.dataset) node.dataset.lfHidden = '1';
+                    }
+
+                    function blankDirectBrandingTextNodes(el) {
+                        if (!el || !el.childNodes) return;
+                        for (var c = 0; c < el.childNodes.length; c++) {
+                            var child = el.childNodes[c];
+                            if (child && child.nodeType === 3 && child.nodeValue) {
+                                var val = child.nodeValue.replace(/\s+/g, ' ').trim();
+                                if (val && val.length <= 90 && /um\s+oferecimento|oferecimento|superflix\s*api|superflixapi/i.test(val)) {
+                                    child.nodeValue = '';
+                                }
+                            }
+                        }
+                    }
+
+                    function cleanBrandingInRoot(root, docRef) {
+                        injectCleanCss(docRef || document);
+                        if (!root || !root.querySelectorAll) return;
                         try {
-                            var nodes = scope.querySelectorAll('div, span, p, a, img, small, label, section, header');
+                            var sel = 'div, span, p, a, img, small, label, section, header, footer, aside, b, strong, em, font, h1, h2, h3, h4, h5, h6, center, figcaption, svg';
+                            var nodes = root.querySelectorAll(sel);
+                            var playerMounted = hasDirectPlayerMounted(docRef || document);
                             for (var i = 0; i < nodes.length; i++) {
                                 var node = nodes[i];
+                                if (node.shadowRoot) {
+                                    cleanBrandingInRoot(node.shadowRoot, docRef || document);
+                                }
+                                blankDirectBrandingTextNodes(node);
                                 if (node.dataset && node.dataset.lfHidden === '1') continue;
                                 if (isSuperFlixBadgeNode(node) || isTransparentClickShield(node)) {
-                                    node.style.setProperty('display', 'none', 'important');
-                                    node.style.setProperty('opacity', '0', 'important');
-                                    node.style.setProperty('visibility', 'hidden', 'important');
-                                    node.style.setProperty('pointer-events', 'none', 'important');
-                                    if (node.dataset) node.dataset.lfHidden = '1';
+                                    hideNode(node);
                                 }
+                            }
+                            if (playerMounted) {
+                                var backCandidates = root.querySelectorAll('button, a, [role="button"]');
+                                for (var b = 0; b < backCandidates.length; b++) {
+                                    var btn = backCandidates[b];
+                                    var bTxt = (btn.innerText || btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                                    if (bTxt === 'voltar' || bTxt === '← voltar') {
+                                        btn.style.setProperty('opacity', '0', 'important');
+                                        btn.style.setProperty('pointer-events', 'none', 'important');
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    }
+
+                    function cleanBrandingAndOverlays(root) {
+                        cleanBrandingInRoot(root || document, document);
+                        // Also walk any accessible same-origin / about:blank / srcdoc iframes
+                        try {
+                            var childFrames = document.querySelectorAll('iframe');
+                            for (var f = 0; f < childFrames.length; f++) {
+                                try {
+                                    var cDoc = childFrames[f].contentDocument;
+                                    if (cDoc) {
+                                        cleanBrandingInRoot(cDoc, cDoc);
+                                        wireMediaWatchersInDoc(cDoc);
+                                    }
+                                } catch (crossErr) {}
                             }
                         } catch (e) {}
                     }
 
                     // 3. Intro Mute / Resume Sync across control frame & nested player frames
                     var heldVideos = [];
-                    function enforceIntroMediaState() {
+                    function enforceIntroMediaStateInDoc(docRef) {
+                        var doc = docRef || document;
+                        if (!doc || !doc.querySelectorAll) return;
                         var active = !!window.__LF_INTRO_PLAYING;
-                        var medias = document.querySelectorAll('video, audio');
+                        var medias = doc.querySelectorAll('video, audio');
                         for (var i = 0; i < medias.length; i++) {
                             var m = medias[i];
                             if (active) {
@@ -255,7 +339,20 @@ object Canal2Automation {
                                 }
                             }
                         }
-                        if (!active) heldVideos = [];
+                    }
+
+                    function enforceIntroMediaState() {
+                        enforceIntroMediaStateInDoc(document);
+                        try {
+                            var childFrames = document.querySelectorAll('iframe');
+                            for (var f = 0; f < childFrames.length; f++) {
+                                try {
+                                    var cDoc = childFrames[f].contentDocument;
+                                    if (cDoc) enforceIntroMediaStateInDoc(cDoc);
+                                } catch (e) {}
+                            }
+                        } catch (e) {}
+                        if (!window.__LF_INTRO_PLAYING) heldVideos = [];
                     }
 
                     function broadcastStateToIframes() {
@@ -282,8 +379,10 @@ object Canal2Automation {
                         }
                     }
 
-                    function wireMediaWatchers() {
-                        var videos = document.querySelectorAll('video');
+                    function wireMediaWatchersInDoc(docRef) {
+                        var doc = docRef || document;
+                        if (!doc || !doc.querySelectorAll) return;
+                        var videos = doc.querySelectorAll('video');
                         for (var i = 0; i < videos.length; i++) {
                             var v = videos[i];
                             if (v.dataset && v.dataset.lfWatched === '1') {
@@ -313,6 +412,10 @@ object Canal2Automation {
                                 reportVideoAlive();
                             }
                         }
+                    }
+
+                    function wireMediaWatchers() {
+                        wireMediaWatchersInDoc(document);
                         enforceIntroMediaState();
                     }
 
@@ -386,17 +489,45 @@ object Canal2Automation {
                         return rect.width > 10 && rect.height > 10;
                     }
 
+                    function hasRedBanSvg(el) {
+                        if (!el || !el.querySelectorAll) return false;
+                        var svgs = el.querySelectorAll('svg');
+                        for (var i = 0; i < svgs.length; i++) {
+                            var s = svgs[i];
+                            var cls = (s.getAttribute && (s.getAttribute('class') || '')) || '';
+                            if (/(ban|slash|blocked|disabled|lock|off|close|xmark)/i.test(cls)) return true;
+                            var cs = window.getComputedStyle(s);
+                            var col = (cs && cs.color) || '';
+                            var m = col.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+                            if (m) {
+                                var r = parseInt(m[1], 10);
+                                var g = parseInt(m[2], 10);
+                                var b = parseInt(m[3], 10);
+                                // Ban icons often appear inside a non-red dark row with gray text
+                                var elCol = window.getComputedStyle(el).color || '';
+                                if (r >= 175 && g <= 80 && b <= 80 && elCol.indexOf('255, 255, 255') === -1) {
+                                    // Check if svg contains a diagonal line or multiple paths typical of globe-ban
+                                    if (s.querySelector('line, [d*="M2 2"], [d*="m2 2"]')) return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+
                     function isDisabledEl(el) {
                         if (!el) return true;
                         if (el.disabled) return true;
-                        if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
+                        if (el.getAttribute) {
+                            if (el.getAttribute('aria-disabled') === 'true' || el.getAttribute('data-disabled') === 'true') return true;
+                        }
                         var cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-                        if (/(disabled|unavailable|offline|locked|bloqueado|indisponivel|cursor-not-allowed)/.test(cls)) return true;
+                        if (/(disabled|unavailable|offline|locked|bloqueado|indisponivel|cursor-not-allowed|pointer-events-none)/.test(cls)) return true;
                         var cs = window.getComputedStyle(el);
-                        if (cs && (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity || '1') < 0.55)) return true;
+                        if (cs && (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity || '1') < 0.65)) return true;
                         if (el.querySelector && el.querySelector('.fa-ban, .fa-lock, .fa-times-circle, .fa-circle-xmark, [class*="ban" i], [class*="disabled" i]')) {
                             return true;
                         }
+                        if (hasRedBanSvg(el)) return true;
                         return false;
                     }
 
@@ -421,24 +552,78 @@ object Canal2Automation {
                         return false;
                     }
 
+                    function isInteractiveCandidate(el, txt) {
+                        var tag = (el.tagName || '').toUpperCase();
+                        if (tag === 'BUTTON' || tag === 'A' || tag === 'LI') return true;
+                        if (el.getAttribute) {
+                            if (el.getAttribute('role') === 'button' || el.getAttribute('onclick')) return true;
+                            if (el.hasAttribute('data-server') || el.hasAttribute('data-player') || el.hasAttribute('data-id') || el.hasAttribute('data-lang') || el.hasAttribute('data-audio')) return true;
+                        }
+                        var cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+                        if (/(server|player|audio|lang|btn|option|card|item|tab|pill|chip|cursor-pointer)/.test(cls)) return true;
+                        var cs = window.getComputedStyle(el);
+                        if (cs && cs.cursor === 'pointer') return true;
+                        if (/^(servidor\s*(principal|alternativo|\d+)|player\s*\d+|dublado|legendado|original|portugu[eê]s|voltar|trocar\s*servidor)$/i.test(txt)) {
+                            return true;
+                        }
+                        return false;
+                    }
+
                     function getClickableNodes() {
-                        var sel = 'button, a, [role="button"], li, div[onclick], span[onclick], [data-server], [data-player], [data-id], [data-lang], [data-audio], [class*="server" i], [class*="player" i], [class*="audio" i], [class*="lang" i], [class*="btn" i]';
+                        var sel = 'button, a, [role="button"], li, div, span, label, p, section, article';
                         var raw = document.querySelectorAll(sel);
                         var out = [];
+                        var seen = [];
                         for (var i = 0; i < raw.length; i++) {
                             var el = raw[i];
                             if (!isVisibleEl(el)) continue;
                             var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-                            if (!txt || txt.length > 55) continue;
+                            if (!txt || txt.length > 60) continue;
+                            if (!isInteractiveCandidate(el, txt)) continue;
+                            // Skip outer wrapper if an inner child already represents the exact same single label
+                            var hasSameTextChild = false;
+                            if (el.children && el.children.length > 0 && el.tagName !== 'BUTTON' && el.tagName !== 'A') {
+                                for (var c = 0; c < el.children.length; c++) {
+                                    var childTxt = (el.children[c].innerText || el.children[c].textContent || '').replace(/\s+/g, ' ').trim();
+                                    if (childTxt === txt && isInteractiveCandidate(el.children[c], childTxt)) {
+                                        hasSameTextChild = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (hasSameTextChild) continue;
+                            if (seen.indexOf(el) !== -1) continue;
+                            seen.push(el);
                             out.push({ el: el, text: txt, lower: txt.toLowerCase() });
                         }
                         return out;
                     }
 
-                    function hasDirectPlayerMounted() {
-                        var v = document.querySelector('video');
+                    function triggerRealClick(el) {
+                        if (!el) return;
+                        try {
+                            el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+                        } catch (e) {}
+                        try {
+                            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                        } catch (e) {}
+                        try {
+                            el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
+                        } catch (e) {}
+                        try {
+                            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                        } catch (e) {}
+                        try {
+                            el.click();
+                        } catch (e) {}
+                    }
+
+                    function hasDirectPlayerMounted(docRef) {
+                        var doc = docRef || document;
+                        if (!doc || !doc.querySelector) return false;
+                        var v = doc.querySelector('video');
                         if (v && (v.readyState >= 2 || v.currentSrc || v.src)) return true;
-                        var iframes = document.querySelectorAll('iframe');
+                        var iframes = doc.querySelectorAll('iframe');
                         for (var i = 0; i < iframes.length; i++) {
                             var s = (iframes[i].getAttribute('src') || '').toLowerCase();
                             if (s && s.indexOf('cloudflare') === -1 && s.indexOf('about:blank') === -1) {
@@ -453,7 +638,7 @@ object Canal2Automation {
                         for (var i = 0; i < nodes.length; i++) {
                             var n = nodes[i];
                             if (isDisabledEl(n.el)) continue;
-                            if (/^(dublado|legendado|original|voltar|reportar|fechar|tentar novamente|copiar)$/i.test(n.lower)) continue;
+                            if (/^(dublado|legendado|original|voltar|← voltar|reportar|fechar|tentar novamente|copiar)$/i.test(n.lower)) continue;
 
                             var priority = 99;
                             if (/servidor\s*principal|\bprincipal\b|player\s*1\b|servidor\s*1\b/.test(n.lower)) {
@@ -476,7 +661,7 @@ object Canal2Automation {
 
                     function findBackButton(nodes) {
                         for (var i = 0; i < nodes.length; i++) {
-                            if (/^(voltar|trocar servidor|servidores)$/i.test(nodes[i].lower) || /\bvoltar\b/.test(nodes[i].lower)) {
+                            if (/^(voltar|← voltar|trocar servidor|servidores)$/i.test(nodes[i].lower) || /\bvoltar\b/.test(nodes[i].lower)) {
                                 return nodes[i].el;
                             }
                         }
@@ -568,7 +753,7 @@ object Canal2Automation {
                             if ((Date.now() - audioLastClickAt) > 650) {
                                 audioLastClickAt = Date.now();
                                 audioClickAttempts += 1;
-                                try { preferredList[0].el.click(); } catch (e) {}
+                                triggerRealClick(preferredList[0].el);
                                 return true;
                             }
                             return true;
@@ -630,7 +815,7 @@ object Canal2Automation {
                                 window.__lfSubframeError = false;
                                 var backBtn = findBackButton(nodes);
                                 if (backBtn) {
-                                    try { backBtn.click(); } catch (e) {}
+                                    triggerRealClick(backBtn);
                                     return;
                                 }
                                 var freshServers = findServerCandidates(nodes);
@@ -660,7 +845,7 @@ object Canal2Automation {
                             activeServerKey = nextServer.key;
                             serverClickedAt = Date.now();
                             window.__lfSubframeError = false;
-                            try { nextServer.el.click(); } catch (e) {}
+                            triggerRealClick(nextServer.el);
                             return;
                         }
 

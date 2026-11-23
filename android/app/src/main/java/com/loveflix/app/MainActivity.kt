@@ -37,6 +37,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.loveflix.app.databinding.ActivityMainBinding
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
@@ -59,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private var canal2AudioPref = "pt"
     private var canal2LastBoundsJson = "{}"
     private var canal2DocStartScript: ScriptHandler? = null
+    private var canal2WrapperHtml: String? = null
 
     private val fileChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -394,6 +396,18 @@ class MainActivity : AppCompatActivity() {
                 request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
+                if (url.startsWith(Canal2Automation.WRAPPER_PATH_PREFIX)) {
+                    val html = canal2WrapperHtml
+                        ?: "<!doctype html><html><body style='background:#000'></body></html>"
+                    return WebResourceResponse(
+                        "text/html",
+                        "utf-8",
+                        200,
+                        "OK",
+                        mapOf("Cache-Control" to "no-store"),
+                        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8))
+                    )
+                }
                 if (AdBlocker.isBlockedUrl(url, request.isForMainFrame)) {
                     return AdBlocker.emptyResponse()
                 }
@@ -427,11 +441,6 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                val script = Canal2Automation.buildDocumentStartScript(
-                    canal2AudioPref,
-                    canal2IntroPlaying
-                )
-                view?.evaluateJavascript(script, null)
                 view?.evaluateJavascript(
                     "window.__lfSetAudioPref && window.__lfSetAudioPref(${JSONObject.quote(canal2AudioPref)});" +
                         "window.__lfSetIntroState && window.__lfSetIntroState(${if (canal2IntroPlaying) "true" else "false"});",
@@ -486,11 +495,19 @@ class MainActivity : AppCompatActivity() {
                 canal2AudioPref,
                 canal2IntroPlaying
             )
-            canal2DocStartScript = WebViewCompat.addDocumentStartJavaScript(
-                binding.canal2WebView,
-                script,
-                setOf("*")
-            )
+            canal2DocStartScript = try {
+                WebViewCompat.addDocumentStartJavaScript(
+                    binding.canal2WebView,
+                    script,
+                    setOf("*", "https://*", "http://*")
+                )
+            } catch (_: IllegalArgumentException) {
+                WebViewCompat.addDocumentStartJavaScript(
+                    binding.canal2WebView,
+                    script,
+                    setOf("*")
+                )
+            }
         }
     }
 
@@ -574,6 +591,7 @@ class MainActivity : AppCompatActivity() {
         }
         canal2DocStartScript?.remove()
         canal2DocStartScript = null
+        canal2WrapperHtml = null
         binding.canal2Container.passThroughTouches = false
         binding.canal2Container.visibility = View.GONE
         binding.canal2FloatingControls.visibility = View.GONE
@@ -612,13 +630,13 @@ class MainActivity : AppCompatActivity() {
                 canal2IntroPlaying = introPlaying
                 refreshCanal2DocumentStartScript()
                 applyCanal2Bounds(boundsJson)
-                val wrapperHtml = Canal2Automation.buildEmbedWrapperHtml(url)
-                binding.canal2WebView.loadDataWithBaseURL(
-                    "https://love-flix.vercel.app/",
-                    wrapperHtml,
-                    "text/html",
-                    "utf-8",
-                    null
+                canal2WrapperHtml = Canal2Automation.buildEmbedWrapperHtml(
+                    url,
+                    canal2AudioPref,
+                    canal2IntroPlaying
+                )
+                binding.canal2WebView.loadUrl(
+                    "${Canal2Automation.WRAPPER_PATH_PREFIX}?t=${System.currentTimeMillis()}"
                 )
             }
         }
