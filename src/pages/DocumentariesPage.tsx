@@ -102,10 +102,10 @@ export const DocumentariesPage: React.FC = () => {
         sectionKicker="Documentários & Histórias Reais"
       />
 
-      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-3">
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+      <div className="px-4 sm:px-6 lg:px-10 mt-4 sm:mt-7 mb-2 sm:mb-3">
+        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 sm:gap-4">
           <div>
-            <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+            <h2 className="font-display text-xl sm:text-3xl font-extrabold text-white tracking-tight">
               Documentários
             </h2>
           </div>

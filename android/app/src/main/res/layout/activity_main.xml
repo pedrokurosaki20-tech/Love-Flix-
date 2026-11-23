@@ -12,30 +12,29 @@
         android:background="@color/loveflix_bg"
         android:overScrollMode="never" />
 
-    <!-- Native Splash Overlay shown cleanly until initial Love Flix shell paints -->
-    <LinearLayout
+    <!-- Native Launch Animation Overlay shown on app startup -->
+    <FrameLayout
         android:id="@+id/splashOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@color/loveflix_bg"
-        android:gravity="center"
-        android:orientation="vertical"
-        android:padding="32dp">
+        android:background="#000000">
 
-        <ImageView
-            android:layout_width="112dp"
-            android:layout_height="112dp"
-            android:contentDescription="@string/app_name"
-            android:scaleType="fitCenter"
-            android:src="@drawable/loveflix_logo" />
+        <VideoView
+            android:id="@+id/splashVideoView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center" />
 
         <ProgressBar
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginTop="24dp"
+            android:id="@+id/splashSlowNetworkSpinner"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="40dp"
             android:indeterminate="true"
-            android:indeterminateTint="@color/loveflix_crimson" />
-    </LinearLayout>
+            android:indeterminateTint="@color/loveflix_crimson"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <!-- Offline / Retry Overlay -->
     <LinearLayout

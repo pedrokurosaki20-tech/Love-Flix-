@@ -4,8 +4,12 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.view.View
 import android.view.WindowManager
@@ -36,6 +40,10 @@ class MainActivity : AppCompatActivity() {
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private var lastBackPressedAt = 0L
     private var hasMainFrameError = false
+    private var isIntroAnimationFinished = false
+    private var isInitialPageFinished = false
+    private var splashPausedPositionMs = 0
+    private val splashSafetyHandler = Handler(Looper.getMainLooper())
 
     private val fileChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -55,18 +63,97 @@ class MainActivity : AppCompatActivity() {
         configureSystemBars(fullscreen = false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        startLaunchIntroVideo()
         setupWebView()
         setupBackNavigation()
 
         binding.retryButton.setOnClickListener {
             hasMainFrameError = false
+            isIntroAnimationFinished = true
+            isInitialPageFinished = false
             binding.offlineOverlay.visibility = View.GONE
             binding.splashOverlay.visibility = View.VISIBLE
+            binding.splashOverlay.alpha = 1f
+            binding.splashVideoView.visibility = View.GONE
+            binding.splashSlowNetworkSpinner.visibility = View.VISIBLE
             binding.webView.reload()
         }
 
         val initialUrl = resolveStartUrl(intent)
         binding.webView.loadUrl(initialUrl)
+    }
+
+    private fun startLaunchIntroVideo() {
+        isIntroAnimationFinished = false
+        splashPausedPositionMs = 0
+        binding.splashOverlay.visibility = View.VISIBLE
+        binding.splashOverlay.alpha = 1f
+        binding.splashVideoView.visibility = View.VISIBLE
+        binding.splashSlowNetworkSpinner.visibility = View.GONE
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            binding.splashVideoView.setAudioFocusRequest(AudioManager.AUDIOFOCUS_NONE)
+        }
+
+        val videoUri = Uri.parse("android.resource://$packageName/${R.raw.loveflix_launch_intro}")
+        binding.splashVideoView.setVideoURI(videoUri)
+
+        binding.splashVideoView.setOnPreparedListener { mediaPlayer ->
+            mediaPlayer.isLooping = false
+            binding.splashVideoView.start()
+        }
+
+        binding.splashVideoView.setOnCompletionListener {
+            onLaunchIntroCompleted()
+        }
+
+        binding.splashVideoView.setOnErrorListener { _, _, _ ->
+            onLaunchIntroCompleted()
+            true
+        }
+
+        splashSafetyHandler.removeCallbacksAndMessages(null)
+        splashSafetyHandler.postDelayed({
+            if (!isIntroAnimationFinished) {
+                onLaunchIntroCompleted()
+            }
+        }, 8500L)
+    }
+
+    private fun onLaunchIntroCompleted() {
+        if (isIntroAnimationFinished) return
+        isIntroAnimationFinished = true
+        splashSafetyHandler.removeCallbacksAndMessages(null)
+
+        if (hasMainFrameError) {
+            binding.splashOverlay.visibility = View.GONE
+            binding.offlineOverlay.visibility = View.VISIBLE
+            return
+        }
+
+        if (!isInitialPageFinished) {
+            binding.splashSlowNetworkSpinner.visibility = View.VISIBLE
+        }
+        maybeDismissSplash()
+    }
+
+    private fun maybeDismissSplash() {
+        if (!isIntroAnimationFinished || !isInitialPageFinished || hasMainFrameError) return
+        if (binding.splashOverlay.visibility != View.VISIBLE) return
+
+        binding.splashSlowNetworkSpinner.visibility = View.GONE
+        binding.splashOverlay.animate()
+            .alpha(0f)
+            .setDuration(240)
+            .withEndAction {
+                binding.splashOverlay.visibility = View.GONE
+                binding.splashOverlay.alpha = 1f
+                try {
+                    binding.splashVideoView.stopPlayback()
+                } catch (_: Exception) {
+                }
+            }
+            .start()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -158,15 +245,9 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 view?.evaluateJavascript(AdBlocker.ANTI_POPUP_JS, null)
                 if (!hasMainFrameError) {
+                    isInitialPageFinished = true
                     binding.offlineOverlay.visibility = View.GONE
-                    binding.splashOverlay.animate()
-                        .alpha(0f)
-                        .setDuration(220)
-                        .withEndAction {
-                            binding.splashOverlay.visibility = View.GONE
-                            binding.splashOverlay.alpha = 1f
-                        }
-                        .start()
+                    maybeDismissSplash()
                 }
                 CookieManager.getInstance().flush()
             }
@@ -179,8 +260,10 @@ class MainActivity : AppCompatActivity() {
                 super.onReceivedError(view, request, error)
                 if (request?.isForMainFrame == true) {
                     hasMainFrameError = true
-                    binding.splashOverlay.visibility = View.GONE
-                    binding.offlineOverlay.visibility = View.VISIBLE
+                    if (isIntroAnimationFinished) {
+                        binding.splashOverlay.visibility = View.GONE
+                        binding.offlineOverlay.visibility = View.VISIBLE
+                    }
                 }
             }
         }
@@ -319,6 +402,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (!isIntroAnimationFinished && binding.splashVideoView.isPlaying) {
+            splashPausedPositionMs = binding.splashVideoView.currentPosition
+            binding.splashVideoView.pause()
+        }
         binding.webView.onPause()
         CookieManager.getInstance().flush()
     }
@@ -326,12 +413,23 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         binding.webView.onResume()
+        if (!isIntroAnimationFinished && binding.splashOverlay.visibility == View.VISIBLE) {
+            if (splashPausedPositionMs > 0) {
+                binding.splashVideoView.seekTo(splashPausedPositionMs)
+            }
+            binding.splashVideoView.start()
+        }
         if (customFullscreenView != null) {
             configureSystemBars(fullscreen = true)
         }
     }
 
     override fun onDestroy() {
+        splashSafetyHandler.removeCallbacksAndMessages(null)
+        try {
+            binding.splashVideoView.stopPlayback()
+        } catch (_: Exception) {
+        }
         customFullscreenCallback = null
         fileUploadCallback?.onReceiveValue(null)
         fileUploadCallback = null

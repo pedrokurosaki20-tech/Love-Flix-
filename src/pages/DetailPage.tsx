@@ -492,7 +492,7 @@ export const MediaDetailPage: React.FC<{
 
           <div className="grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-7 lg:gap-10 items-start">
             {/* Poster */}
-            <div className="md:col-span-4 lg:col-span-3 max-w-[164px] sm:max-w-[220px] md:max-w-[260px] mx-auto md:mx-0 w-full">
+            <div className="md:col-span-4 lg:col-span-3 max-w-[196px] sm:max-w-[230px] md:max-w-[260px] mx-auto md:mx-0 w-full">
               <div className="aspect-[2/3] w-full rounded-2xl overflow-hidden border border-white/15 shadow-2xl">
                 <ResilientImage
                   src={getPosterUrl(detail.poster_path, 'w780')}

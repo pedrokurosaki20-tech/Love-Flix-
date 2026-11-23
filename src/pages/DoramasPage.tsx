@@ -94,8 +94,8 @@ export const DoramasPage: React.FC = () => {
         sectionKicker="Doramas · K-Dramas, J-Dramas & C-Dramas"
       />
 
-      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-3">
-        <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+      <div className="px-4 sm:px-6 lg:px-10 mt-4 sm:mt-7 mb-2 sm:mb-3">
+        <h2 className="font-display text-xl sm:text-3xl font-extrabold text-white tracking-tight">
           Doramas
         </h2>
       </div>

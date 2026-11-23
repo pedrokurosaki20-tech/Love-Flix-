@@ -126,8 +126,8 @@ export const SeriesPage: React.FC = () => {
       />
 
       {/* Page Title Header */}
-      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-4">
-        <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+      <div className="px-4 sm:px-6 lg:px-10 mt-4 sm:mt-7 mb-2 sm:mb-4">
+        <h2 className="font-display text-xl sm:text-3xl font-extrabold text-white tracking-tight">
           Séries
         </h2>
       </div>

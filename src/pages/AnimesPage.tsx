@@ -152,10 +152,10 @@ export const AnimesPage: React.FC = () => {
       />
 
       {/* Page Title & Format Switcher */}
-      <div className="px-4 sm:px-6 lg:px-10 mt-8 mb-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="px-4 sm:px-6 lg:px-10 mt-4 sm:mt-7 mb-4 sm:mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
           <div>
-            <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+            <h2 className="font-display text-xl sm:text-3xl font-extrabold text-white tracking-tight">
               Animes
             </h2>
           </div>
