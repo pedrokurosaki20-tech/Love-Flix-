@@ -1186,7 +1186,7 @@ export const SessaoFlixPage: React.FC = () => {
         <main className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
           <section className="relative flex shrink-0 flex-col bg-black lg:min-h-0 lg:flex-1">
             {/* Minimal Top Bar: Exit + Participants Count only */}
-            <header className="z-20 flex h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] bg-[#080808] px-3 sm:px-5">
+            <header className="z-20 flex h-10 sm:h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] bg-[#080808] px-3 sm:px-5">
               <button
                 type="button"
                 onClick={() => {
@@ -1219,7 +1219,7 @@ export const SessaoFlixPage: React.FC = () => {
               className={`relative flex items-center justify-center overflow-hidden bg-black ${
                 isStageFullscreen
                   ? 'w-screen h-screen max-h-none'
-                  : 'w-full aspect-video max-h-[42dvh] shrink-0 lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0'
+                  : 'w-full aspect-video max-h-[38dvh] sm:max-h-[42dvh] shrink-0 lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0'
               }`}
             >
               {/* Official Love Flix Opening Video with Sound (identical to StreamingPlayerModal) */}

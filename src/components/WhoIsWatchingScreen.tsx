@@ -133,12 +133,12 @@ export const WhoIsWatchingScreen: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#080808] text-white flex flex-col justify-between items-center px-4 py-8 relative overflow-hidden select-none">
+    <div className="min-h-[100dvh] bg-[#080808] text-white flex flex-col justify-between items-center px-4 py-4 sm:py-8 relative overflow-hidden select-none">
       {/* Glow de iluminação cinematográfica Love Flix */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[380px] bg-[#E50914]/10 rounded-full blur-[160px] pointer-events-none" />
 
       {/* Topo: Logo Love Flix */}
-      <header className="relative z-10 text-center pt-2 sm:pt-4">
+      <header className="relative z-10 text-center pt-1 sm:pt-4">
         <div className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
           <span className="text-[#E50914]">LOVE</span> FLIX
         </div>
@@ -150,9 +150,9 @@ export const WhoIsWatchingScreen: React.FC = () => {
       </header>
 
       {/* Centro: Tela Quem está assistindo? */}
-      <main className="relative z-10 w-full max-w-3xl mx-auto my-auto flex flex-col items-center text-center py-6">
+      <main className="relative z-10 w-full max-w-3xl mx-auto my-auto flex flex-col items-center text-center py-4 sm:py-6">
         {/* Título e Subtítulo */}
-        <div className="mb-8 sm:mb-12 space-y-2">
+        <div className="mb-6 sm:mb-10 space-y-1.5 sm:space-y-2">
           <h1 className="font-display text-2xl sm:text-4xl md:text-5xl font-extrabold tracking-tight text-white animate-fade-in">
             {isManaging ? 'Gerenciar perfis' : 'Quem está assistindo?'}
           </h1>
@@ -234,7 +234,7 @@ export const WhoIsWatchingScreen: React.FC = () => {
         </div>
 
         {/* Botão de Alternar Modo: Gerenciar Perfis / Concluir */}
-        <div className="mt-8 sm:mt-10 flex flex-col items-center gap-4">
+        <div className="mt-6 sm:mt-10 flex flex-col items-center gap-3.5 sm:gap-4">
           {isManaging ? (
             <button
               type="button"

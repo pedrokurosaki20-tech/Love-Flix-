@@ -480,19 +480,19 @@ export const MediaDetailPage: React.FC<{
           <div className="absolute inset-0 bg-gradient-to-r from-[#080808] via-[#080808]/75 to-transparent" />
         </div>
 
-        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-10 pt-6 pb-12">
+        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-10 pt-4 sm:pt-6 pb-8 sm:pb-12">
           <button
             type="button"
             onClick={() => window.history.back()}
-            className="inline-flex items-center gap-2 text-xs sm:text-sm font-semibold text-[#A1A1A1] hover:text-white mb-6 transition-colors cursor-pointer"
+            className="inline-flex items-center gap-2 text-xs sm:text-sm font-semibold text-[#A1A1A1] hover:text-white mb-4 sm:mb-6 transition-colors cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>Voltar</span>
           </button>
 
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-7 lg:gap-10 items-start">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-7 lg:gap-10 items-start">
             {/* Poster */}
-            <div className="md:col-span-4 lg:col-span-3 max-w-[260px] mx-auto md:mx-0 w-full">
+            <div className="md:col-span-4 lg:col-span-3 max-w-[164px] sm:max-w-[220px] md:max-w-[260px] mx-auto md:mx-0 w-full">
               <div className="aspect-[2/3] w-full rounded-2xl overflow-hidden border border-white/15 shadow-2xl">
                 <ResilientImage
                   src={getPosterUrl(detail.poster_path, 'w780')}
@@ -504,14 +504,14 @@ export const MediaDetailPage: React.FC<{
             </div>
 
             {/* Primary Metadata & Actions */}
-            <div className="md:col-span-8 lg:col-span-9 space-y-5">
+            <div className="md:col-span-8 lg:col-span-9 space-y-4 sm:space-y-5">
               <div>
                 <p className="text-xs sm:text-sm font-bold text-[#FF253A] mb-1.5">
                   {getMediaTypeBadgeText(detail, mediaType)}
                   {detail.tagline ? ` · ${detail.tagline}` : ''}
                 </p>
 
-                <h1 className="font-display text-3xl sm:text-4xl lg:text-5xl font-extrabold text-white tracking-tight leading-tight text-balance">
+                <h1 className="font-display text-2xl sm:text-4xl lg:text-5xl font-extrabold text-white tracking-tight leading-tight text-balance">
                   {title}
                 </h1>
 

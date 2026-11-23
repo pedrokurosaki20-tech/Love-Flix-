@@ -90,15 +90,15 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
 
   if (loading || heroItems.length === 0) {
     return (
-      <section className="relative w-full h-[500px] sm:h-[560px] lg:h-[640px] bg-[#101010] overflow-hidden border-b border-white/[0.06]">
-        <div className="max-w-7xl mx-auto h-full flex flex-col justify-end px-4 sm:px-6 lg:px-10 pb-14">
-          <div className="w-32 h-4 bg-white/10 rounded animate-pulse mb-4" />
-          <div className="w-3/4 max-w-xl h-12 bg-white/10 rounded-lg animate-pulse mb-4" />
-          <div className="w-64 h-4 bg-white/10 rounded animate-pulse mb-5" />
-          <div className="w-full max-w-xl h-16 bg-white/10 rounded-lg animate-pulse mb-7" />
-          <div className="flex gap-3">
-            <div className="w-36 h-11 bg-white/10 rounded-xl animate-pulse" />
-            <div className="w-44 h-11 bg-white/10 rounded-xl animate-pulse" />
+      <section className="relative w-full h-[330px] sm:h-[460px] lg:h-[600px] bg-[#101010] overflow-hidden border-b border-white/[0.06]">
+        <div className="max-w-7xl mx-auto h-full flex flex-col justify-end px-4 sm:px-6 lg:px-10 pb-6 sm:pb-12">
+          <div className="w-28 h-3.5 bg-white/10 rounded animate-pulse mb-2.5 sm:mb-4" />
+          <div className="w-3/4 max-w-xl h-8 sm:h-12 bg-white/10 rounded-lg animate-pulse mb-2.5 sm:mb-4" />
+          <div className="w-52 sm:w-64 h-3.5 bg-white/10 rounded animate-pulse mb-3 sm:mb-5" />
+          <div className="w-full max-w-xl h-10 sm:h-16 bg-white/10 rounded-lg animate-pulse mb-4 sm:mb-7" />
+          <div className="flex gap-2.5 sm:gap-3">
+            <div className="w-32 sm:w-36 h-10 sm:h-11 bg-white/10 rounded-xl animate-pulse" />
+            <div className="w-36 sm:w-44 h-10 sm:h-11 bg-white/10 rounded-xl animate-pulse" />
           </div>
         </div>
       </section>
@@ -123,7 +123,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
       aria-label="Destaque principal"
       onMouseEnter={() => setIsPaused(true)}
       onMouseLeave={() => setIsPaused(false)}
-      className="relative w-full min-h-[520px] sm:min-h-[580px] lg:min-h-[650px] flex items-end overflow-hidden bg-[#080808]"
+      className="relative w-full min-h-[340px] sm:min-h-[480px] lg:min-h-[620px] flex items-end overflow-hidden bg-[#080808]"
     >
       {/* Background Image */}
       <div key={`${mediaType}-${current.id}`} className="absolute inset-0">
@@ -145,18 +145,18 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
       </div>
 
       {/* Content */}
-      <div className="relative z-10 w-full px-4 sm:px-6 lg:px-10 pb-12 pt-24">
+      <div className="relative z-10 w-full px-4 sm:px-6 lg:px-10 pb-6 sm:pb-12 pt-8 sm:pt-20">
         <div className="max-w-3xl">
-          <p className="text-xs sm:text-sm font-semibold text-[#FF253A] tracking-wide mb-2">
+          <p className="text-[11px] sm:text-sm font-semibold text-[#FF253A] tracking-wide mb-1.5 sm:mb-2">
             {sectionKicker || `${getMediaTypeBadgeText(current)} em Destaque`}
           </p>
 
-          <h1 className="font-display text-3xl sm:text-5xl lg:text-6xl font-extrabold text-white tracking-tight leading-[1.08] text-balance mb-3.5">
+          <h1 className="font-display text-2xl sm:text-5xl lg:text-6xl font-extrabold text-white tracking-tight leading-[1.08] text-balance mb-2 sm:mb-3.5">
             {title}
           </h1>
 
           {/* Unboxed Metadata Row (Zero-Pill Discipline) */}
-          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs sm:text-sm font-semibold text-white/85 mb-4 tabular-nums">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs sm:text-sm font-semibold text-white/85 mb-2.5 sm:mb-4 tabular-nums">
             {rating && Number(rating) > 0 && (
               <span className="inline-flex items-center gap-1 text-amber-400 font-bold">
                 <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
@@ -188,22 +188,22 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
           </div>
 
           {current.overview ? (
-            <p className="text-sm sm:text-base text-white/80 leading-relaxed line-clamp-3 max-w-2xl mb-7">
+            <p className="text-xs sm:text-base text-white/80 leading-relaxed line-clamp-2 sm:line-clamp-3 max-w-2xl mb-4 sm:mb-7">
               {current.overview}
             </p>
           ) : (
-            <p className="text-sm sm:text-base text-[#A1A1A1] leading-relaxed max-w-2xl mb-7">
+            <p className="text-xs sm:text-base text-[#A1A1A1] leading-relaxed line-clamp-2 sm:line-clamp-3 max-w-2xl mb-4 sm:mb-7">
               Explore todos os detalhes, elenco, avaliações e conteúdos relacionados desta produção no catálogo oficial da Love Flix.
             </p>
           )}
 
           {/* Action Buttons */}
           <div className="w-full max-w-xl">
-            <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-2.5 sm:gap-3">
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-2 sm:gap-3">
               <button
                 type="button"
                 onClick={() => playTrailerForItem(current)}
-                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white hover:bg-white/90 text-black text-sm font-extrabold shadow-xl transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white shrink-0 sm:shrink min-h-[46px]"
+                className="inline-flex items-center justify-center gap-2 px-4 sm:px-5 py-2 sm:py-3 rounded-xl bg-white hover:bg-white/90 text-black text-xs sm:text-sm font-extrabold shadow-xl transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white shrink-0 sm:shrink min-h-[40px] sm:min-h-[46px]"
               >
                 <Play className="w-4 h-4 fill-black text-black" />
                 <span>Assistir</span>
@@ -212,7 +212,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
               <button
                 type="button"
                 onClick={() => openMediaDetail(current)}
-                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-white/15 hover:bg-white/25 backdrop-blur-md text-white text-sm font-bold border border-white/20 transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] shrink-0 sm:shrink min-h-[46px]"
+                className="inline-flex items-center justify-center gap-2 px-4 sm:px-5 py-2 sm:py-3 rounded-xl bg-white/15 hover:bg-white/25 backdrop-blur-md text-white text-xs sm:text-sm font-bold border border-white/20 transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E50914] shrink-0 sm:shrink min-h-[40px] sm:min-h-[46px]"
               >
                 <Info className="w-4 h-4" />
                 <span>Mais detalhes</span>
@@ -221,7 +221,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
               <button
                 type="button"
                 onClick={() => toggleMyList(current)}
-                className={`inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 shrink-0 sm:shrink min-h-[46px] ${
+                className={`inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 py-2 sm:py-3 rounded-xl text-xs sm:text-sm font-semibold border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 shrink-0 sm:shrink min-h-[40px] sm:min-h-[46px] ${
                   inList
                     ? 'bg-white/15 hover:bg-white/20 text-white border-white/30 backdrop-blur-md'
                     : 'bg-black/50 hover:bg-black/70 text-white/80 hover:text-white border-white/15 backdrop-blur-sm'
@@ -245,7 +245,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
                 onClick={() => toggleFavorite(current)}
                 aria-label={fav ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
                 title={fav ? 'Remover dos favoritos' : 'Favoritar'}
-                className={`inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 shrink-0 sm:shrink min-h-[46px] ${
+                className={`inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 py-2 sm:py-3 rounded-xl text-xs sm:text-sm font-semibold border transition-all duration-150 active:scale-[0.98] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 shrink-0 sm:shrink min-h-[40px] sm:min-h-[46px] ${
                   fav
                     ? 'bg-white/15 hover:bg-white/20 text-white border-white/30 backdrop-blur-md'
                     : 'bg-black/50 hover:bg-black/70 border-white/15 text-white/80 hover:text-white backdrop-blur-sm'
@@ -260,7 +260,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
 
         {/* Manual Rotation Controls & Slide Indicators */}
         {heroItems.length > 1 && (
-          <div className="mt-8 flex items-center justify-between gap-4">
+          <div className="mt-4 sm:mt-8 flex items-center justify-between gap-4">
             <div className="flex items-center gap-2" role="tablist" aria-label="Destaques">
               {heroItems.map((item, idx) => {
                 const isSelected = idx === activeIndex;

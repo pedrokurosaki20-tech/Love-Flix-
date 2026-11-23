@@ -92,7 +92,7 @@ const AppWorkspace: React.FC = () => {
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen bg-[#080808] text-white flex items-center justify-center">
+      <div className="min-h-[100dvh] bg-[#080808] text-white flex items-center justify-center">
         <div className="font-display text-xl font-extrabold tracking-tight">
           <span className="text-[#E50914]">LOVE</span> FLIX
         </div>
@@ -105,7 +105,7 @@ const AppWorkspace: React.FC = () => {
     // Quando acabou de cadastrar e aguarda confirmação: fecha a tela de cadastro e exibe apenas o card estilizado de e-mail enviado
     if (!isPasswordRecovery && pendingEmailConfirmation) {
       return (
-        <div className="min-h-screen bg-[#080808] text-white flex flex-col justify-center items-center px-3 sm:px-4 py-8 relative overflow-hidden">
+        <div className="min-h-[100dvh] bg-[#080808] text-white flex flex-col justify-center items-center px-3 sm:px-4 py-6 relative overflow-hidden">
           <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] h-[320px] bg-[#E50914]/14 rounded-full blur-[150px] pointer-events-none" />
           <div className="relative z-10 w-full flex justify-center">
             <EmailConfirmationCard />
@@ -116,7 +116,7 @@ const AppWorkspace: React.FC = () => {
     }
 
     return (
-      <div className="min-h-screen bg-[#080808] text-white flex flex-col justify-center items-center px-4 py-8 relative overflow-hidden">
+      <div className="min-h-[100dvh] bg-[#080808] text-white flex flex-col justify-center items-center px-4 py-6 relative overflow-hidden">
         {/* Glow de iluminação cinematográfica */}
         <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[520px] h-[340px] bg-[#E50914]/10 rounded-full blur-[140px] pointer-events-none" />
 
@@ -204,7 +204,7 @@ const AppWorkspace: React.FC = () => {
   return (
     <div
       className={`bg-[#080808] text-white flex flex-col ${
-        isActiveWatchRoom ? 'h-[100dvh] overflow-hidden' : 'min-h-screen'
+        isActiveWatchRoom ? 'h-[100dvh] overflow-hidden' : 'min-h-[100dvh]'
       }`}
     >
       {!isActiveWatchRoom && <Header />}

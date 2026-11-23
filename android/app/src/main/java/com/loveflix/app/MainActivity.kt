@@ -22,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -50,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        setupWindowInsets()
         configureSystemBars(fullscreen = false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -255,8 +257,26 @@ class MainActivity : AppCompatActivity() {
         configureSystemBars(fullscreen = false)
     }
 
+    private fun setupWindowInsets() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.rootContainer) { view, windowInsets ->
+            if (customFullscreenView != null) {
+                view.setPadding(0, 0, 0, 0)
+            } else {
+                val safeInsets = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+                )
+                val imeInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+                val bottomPadding = maxOf(safeInsets.bottom, imeInsets.bottom)
+                view.setPadding(safeInsets.left, safeInsets.top, safeInsets.right, bottomPadding)
+            }
+            windowInsets
+        }
+        ViewCompat.requestApplyInsets(binding.rootContainer)
+    }
+
     private fun configureSystemBars(fullscreen: Boolean) {
-        WindowCompat.setDecorFitsSystemWindows(window, !fullscreen)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.isAppearanceLightStatusBars = false
         controller.isAppearanceLightNavigationBars = false
@@ -268,6 +288,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
         }
+        ViewCompat.requestApplyInsets(binding.rootContainer)
     }
 
     private fun setupBackNavigation() {

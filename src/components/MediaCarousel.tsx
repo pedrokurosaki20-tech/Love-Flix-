@@ -48,16 +48,16 @@ export const MediaCarousel: React.FC<MediaCarouselProps> = ({
 
   const cardWidthClass = showRankNumbers
     ? profile.compactCards
-      ? 'w-[160px] sm:w-[180px] lg:w-[196px]'
-      : 'w-[176px] sm:w-[202px] lg:w-[224px]'
+      ? 'w-[144px] sm:w-[180px] lg:w-[196px]'
+      : 'w-[154px] sm:w-[202px] lg:w-[224px]'
     : profile.compactCards
-      ? 'w-[136px] sm:w-[154px] lg:w-[168px]'
-      : 'w-[152px] sm:w-[176px] lg:w-[196px]';
+      ? 'w-[122px] sm:w-[154px] lg:w-[168px]'
+      : 'w-[134px] sm:w-[176px] lg:w-[196px]';
 
   return (
-    <section className="py-3.5 sm:py-4">
-      <div className="flex items-center justify-between gap-4 px-4 sm:px-6 lg:px-10 mb-3">
-        <h2 className="font-display text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+    <section className="py-2.5 sm:py-4">
+      <div className="flex items-center justify-between gap-4 px-4 sm:px-6 lg:px-10 mb-2 sm:mb-3">
+        <h2 className="font-display text-base sm:text-xl font-bold text-white tracking-tight truncate">
           {title}
         </h2>
 
@@ -100,7 +100,7 @@ export const MediaCarousel: React.FC<MediaCarouselProps> = ({
           )}
         </div>
       ) : loading ? (
-        <div className="flex gap-3.5 sm:gap-4 overflow-hidden px-4 sm:px-6 lg:px-10">
+        <div className="flex gap-3 sm:gap-4 overflow-hidden px-4 sm:px-6 lg:px-10">
           {Array.from({ length: 7 }).map((_, idx) => (
             <div key={idx} className={`${cardWidthClass} shrink-0`}>
               <div className="aspect-[2/3] w-full rounded-xl bg-[#161616] animate-pulse border border-white/[0.05]" />
@@ -116,7 +116,7 @@ export const MediaCarousel: React.FC<MediaCarouselProps> = ({
       ) : (
         <div
           ref={scrollRef}
-          className="flex gap-3.5 sm:gap-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory px-4 sm:px-6 lg:px-10 pb-2"
+          className="flex gap-3 sm:gap-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory px-4 sm:px-6 lg:px-10 pb-2"
         >
           {items.map((item, idx) => (
             <div
