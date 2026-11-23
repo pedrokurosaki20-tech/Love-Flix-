@@ -88,8 +88,23 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   const inList = isInMyList(item.id, mediaType);
   const fav = isFavorite(item.id, mediaType);
 
+  const hasRank = rankNumber !== undefined;
+
   return (
-    <article className="group relative flex flex-col select-none">
+    <article className={`group relative flex flex-col select-none ${hasRank ? 'pl-5 sm:pl-6' : ''}`}>
+      {hasRank && (
+        <span
+          aria-hidden="true"
+          className={`pointer-events-none absolute left-0 bottom-[50px] z-20 font-display font-black leading-[0.82] select-none tabular-nums tracking-tighter bg-gradient-to-b from-white via-white/95 to-white/45 bg-clip-text text-transparent [-webkit-text-stroke:1.5px_rgba(255,255,255,0.24)] drop-shadow-[0_6px_14px_rgba(0,0,0,0.98)] transition-transform duration-200 group-hover:scale-105 group-hover:from-white group-hover:to-[#FF253A] ${
+            rankNumber >= 10
+              ? 'text-[52px] sm:text-[64px] -ml-0.5'
+              : 'text-[66px] sm:text-[80px]'
+          }`}
+        >
+          {rankNumber}
+        </span>
+      )}
+
       <div
         onClick={() => openMediaDetail(item)}
         role="button"
@@ -109,13 +124,8 @@ export const MediaCard: React.FC<MediaCardProps> = ({
           className="w-full h-full"
         />
 
-        {/* Rank Number Editorial Indicator (when inside Top 10) */}
-        {rankNumber !== undefined && (
-          <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-xs border border-white/15">
-            <span className="font-mono text-xs font-bold tabular-nums text-[#FF253A]">
-              #{String(rankNumber).padStart(2, '0')}
-            </span>
-          </div>
+        {hasRank && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/75 via-black/25 to-transparent" />
         )}
 
         {/* Custom Remove Action (for Minha Lista / Favoritos / Continue Assistindo) */}

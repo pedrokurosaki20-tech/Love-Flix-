@@ -46,9 +46,13 @@ export const MediaCarousel: React.FC<MediaCarouselProps> = ({
     return null;
   }
 
-  const cardWidthClass = profile.compactCards
-    ? 'w-[136px] sm:w-[154px] lg:w-[168px]'
-    : 'w-[152px] sm:w-[176px] lg:w-[196px]';
+  const cardWidthClass = showRankNumbers
+    ? profile.compactCards
+      ? 'w-[160px] sm:w-[180px] lg:w-[196px]'
+      : 'w-[176px] sm:w-[202px] lg:w-[224px]'
+    : profile.compactCards
+      ? 'w-[136px] sm:w-[154px] lg:w-[168px]'
+      : 'w-[152px] sm:w-[176px] lg:w-[196px]';
 
   return (
     <section className="py-3.5 sm:py-4">

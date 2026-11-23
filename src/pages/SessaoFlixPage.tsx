@@ -7,8 +7,10 @@ import {
   Flame,
   Loader2,
   LogOut,
+  Minimize2,
   Play,
   Radio,
+  Scan,
   Search,
   Send,
   SkipForward,
@@ -140,6 +142,8 @@ export const SessaoFlixPage: React.FC = () => {
   const [activeIsCinemaExclusive, setActiveIsCinemaExclusive] = useState(false);
   const [iframeLoading, setIframeLoading] = useState(true);
   const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
+  const [isStageFullscreen, setIsStageFullscreen] = useState(false);
+  const [roomIframeFillZoom, setRoomIframeFillZoom] = useState(false);
   const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
 
   // Official Love Flix Opening Intro State
@@ -148,6 +152,7 @@ export const SessaoFlixPage: React.FC = () => {
   const [isIntroMuted, setIsIntroMuted] = useState(false);
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const videoStageRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const introVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastIntroContentKeyRef = useRef<string | null>(null);
@@ -165,6 +170,76 @@ export const SessaoFlixPage: React.FC = () => {
   const suppressOutgoingSyncUntilRef = useRef<number>(0);
   const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptedAutoRoomRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const syncFsState = () => {
+      const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+      const isFs = Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
+      setIsStageFullscreen(isFs);
+      try {
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: 'LOVEFLIX_FULLSCREEN_STATE', fullscreen: isFs },
+          '*'
+        );
+      } catch {}
+    };
+    document.addEventListener('fullscreenchange', syncFsState);
+    document.addEventListener('webkitfullscreenchange', syncFsState);
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFsState);
+      document.removeEventListener('webkitfullscreenchange', syncFsState);
+    };
+  }, []);
+
+  useEffect(() => {
+    setRoomIframeFillZoom(false);
+  }, [syncedMedia?.tmdbId, currentChannel, syncedMedia?.season, syncedMedia?.episode]);
+
+  const toggleRoomStageFullscreen = useCallback(() => {
+    const fsDoc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    const activeFs = document.fullscreenElement || fsDoc.webkitFullscreenElement;
+    if (activeFs) {
+      try {
+        const orientation = screen.orientation as ScreenOrientation & { unlock?: () => void };
+        orientation?.unlock?.();
+      } catch {}
+      try {
+        if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+          document.exitFullscreen().catch(() => {});
+        } else if (fsDoc.webkitExitFullscreen) {
+          fsDoc.webkitExitFullscreen();
+        }
+      } catch {}
+      return;
+    }
+
+    const el = videoStageRef.current as (HTMLDivElement & {
+      webkitRequestFullscreen?: () => Promise<void> | void;
+      msRequestFullscreen?: () => Promise<void> | void;
+    }) | null;
+    if (!el) return;
+    try {
+      if (typeof el.requestFullscreen === 'function') {
+        el.requestFullscreen()
+          .then(() => {
+            try {
+              const orientation = screen.orientation as ScreenOrientation & {
+                lock?: (o: string) => Promise<void>;
+              };
+              orientation?.lock?.('landscape')?.catch?.(() => {});
+            } catch {}
+          })
+          .catch(() => {});
+      } else if (typeof el.webkitRequestFullscreen === 'function') {
+        el.webkitRequestFullscreen();
+      } else if (typeof el.msRequestFullscreen === 'function') {
+        el.msRequestFullscreen();
+      }
+    } catch {}
+  }, []);
 
   const effectiveRoomImdb = useMemo(() => {
     if (syncedMedia?.imdbId && /^tt\d+/i.test(syncedMedia.imdbId)) {
@@ -884,10 +959,23 @@ export const SessaoFlixPage: React.FC = () => {
         return;
       }
 
+      if (d.type === 'LOVEFLIX_TOGGLE_FULLSCREEN') {
+        toggleRoomStageFullscreen();
+        return;
+      }
+
       if (d.type === 'LOVEFLIX_PLAYER_IFRAME_BOOT' || d.type === 'LOVEFLIX_PLAYER_READY') {
         if (!effectiveIsPlayingIntro) {
           notifyIframeIntroEnded();
         }
+        try {
+          const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+          const isFsNow = Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
+          iframeRef.current?.contentWindow?.postMessage(
+            { type: 'LOVEFLIX_FULLSCREEN_STATE', fullscreen: isFsNow },
+            '*'
+          );
+        } catch {}
       }
 
       if (d.type === 'LOVEFLIX_PLAYER_READY' && iframeRef.current?.contentWindow) {
@@ -969,6 +1057,7 @@ export const SessaoFlixPage: React.FC = () => {
     syncPlaybackToExternalRoom,
     syncedMedia,
     syncedPlayback,
+    toggleRoomStageFullscreen,
   ]);
 
   // Subscribe to remote playback commands (play, pause, seek, sync) from the host
@@ -1126,7 +1215,12 @@ export const SessaoFlixPage: React.FC = () => {
 
             <div
               id="SuperCDNContainerVideo"
-              className="relative w-full aspect-video max-h-[42dvh] shrink-0 overflow-hidden bg-black lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0"
+              ref={videoStageRef}
+              className={`relative flex items-center justify-center overflow-hidden bg-black ${
+                isStageFullscreen
+                  ? 'w-screen h-screen max-h-none'
+                  : 'w-full aspect-video max-h-[42dvh] shrink-0 lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0'
+              }`}
             >
               {/* Official Love Flix Opening Video with Sound (identical to StreamingPlayerModal) */}
               {syncedMedia && effectiveIsPlayingIntro && (
@@ -1225,23 +1319,54 @@ export const SessaoFlixPage: React.FC = () => {
               ) : syncedMedia ? (
                 <>
                   {shouldMountIframe && streamSrc && (
-                    <iframe
-                      ref={iframeRef}
-                      key={streamIdentityKey}
-                      src={streamSrc}
-                      title={`${syncedMedia.title} — Canal ${currentChannel}`}
-                      width="100%"
-                      height="100%"
-                      scrolling="no"
-                      frameBorder="0"
-                      referrerPolicy={currentChannel === 2 ? 'no-referrer' : undefined}
-                      onLoad={() => setIframeLoading(false)}
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
-                      allowFullScreen
-                      className={`h-full w-full border-0 bg-black ${
-                        effectiveIsPlayingIntro ? 'pointer-events-none' : ''
-                      }`}
-                    />
+                    <div
+                      className={`relative flex h-full w-full max-h-full max-w-full items-center justify-center bg-black transition-transform duration-200 ${
+                        isStageFullscreen ? '' : 'lg:aspect-video'
+                      } ${currentChannel !== 1 && roomIframeFillZoom ? 'scale-[1.24]' : ''}`}
+                    >
+                      <iframe
+                        ref={iframeRef}
+                        key={streamIdentityKey}
+                        src={streamSrc}
+                        title={`${syncedMedia.title} — Canal ${currentChannel}`}
+                        width="100%"
+                        height="100%"
+                        scrolling="no"
+                        frameBorder="0"
+                        referrerPolicy={currentChannel === 2 ? 'no-referrer' : undefined}
+                        onLoad={() => setIframeLoading(false)}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                        allowFullScreen
+                        className={`h-full w-full border-0 bg-black ${
+                          effectiveIsPlayingIntro ? 'pointer-events-none' : ''
+                        }`}
+                      />
+                    </div>
+                  )}
+                  {isStageFullscreen && currentChannel !== 1 && (
+                    <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setRoomIframeFillZoom((prev) => !prev)}
+                        className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-bold backdrop-blur-md transition-colors cursor-pointer ${
+                          roomIframeFillZoom
+                            ? 'border-[#FF253A] bg-[#E50914] text-white'
+                            : 'border-white/15 bg-[#141414]/80 text-white hover:bg-[#222222]'
+                        }`}
+                        title={roomIframeFillZoom ? 'Formato original' : 'Preencher tela'}
+                      >
+                        <Scan className="h-3.5 w-3.5" />
+                        <span>{roomIframeFillZoom ? 'Original' : 'Preencher'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={toggleRoomStageFullscreen}
+                        aria-label="Sair da tela cheia"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-[#141414]/80 text-white backdrop-blur-md transition-colors hover:bg-[#222222] cursor-pointer"
+                      >
+                        <Minimize2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   )}
                   {(resolvingRoomImdb || iframeLoading) && !effectiveIsPlayingIntro && (
                     <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-[#080808]">

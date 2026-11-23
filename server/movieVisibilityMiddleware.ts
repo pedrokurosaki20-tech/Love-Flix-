@@ -27,7 +27,7 @@ function isTvSearchEndpoint(path: string): boolean {
 }
 
 function isMixedSearchEndpoint(path: string): boolean {
-  return path.startsWith('search/multi') || path.startsWith('trending/all/');
+  return path.startsWith('search/multi') || path.startsWith('trending/all/') || path.startsWith('trending/tv/');
 }
 
 /**

@@ -214,7 +214,7 @@ export function registerApiRoutes(app: Express): void {
                   if (resolvedType === 'person') return true;
 
                   if (resolvedType === 'tv') {
-                    if (isMultiSearch || isTvSearch || cleanPath.startsWith('trending/all/')) {
+                    if (isMultiSearch || isTvSearch || cleanPath.startsWith('trending/')) {
                       if (item.first_air_date && item.first_air_date > today) return false;
                       return checkTvSearchAvailability(item.id);
                     }

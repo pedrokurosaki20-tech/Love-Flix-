@@ -8,6 +8,7 @@ import {
   Maximize2,
   Minimize2,
   Play,
+  Scan,
   SkipForward,
   Tv,
   Volume2,
@@ -81,6 +82,7 @@ export const StreamingPlayerModal: React.FC = () => {
 
   const [iframeLoading, setIframeLoading] = useState(false);
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
+  const [iframeFillZoom, setIframeFillZoom] = useState(false);
   const [sendingToRoom, setSendingToRoom] = useState(false);
   const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
 
@@ -135,6 +137,66 @@ export const StreamingPlayerModal: React.FC = () => {
       }
     }
   }, []);
+
+  const enterFullscreenElement = useCallback((el: HTMLElement | null) => {
+    if (!el) return;
+    const target = el as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void> | void;
+      msRequestFullscreen?: () => Promise<void> | void;
+    };
+    try {
+      if (typeof target.requestFullscreen === 'function') {
+        target
+          .requestFullscreen()
+          .then(() => {
+            try {
+              const orientation = screen.orientation as ScreenOrientation & {
+                lock?: (o: string) => Promise<void>;
+              };
+              orientation?.lock?.('landscape')?.catch?.(() => {});
+            } catch {}
+          })
+          .catch(() => {});
+      } else if (typeof target.webkitRequestFullscreen === 'function') {
+        target.webkitRequestFullscreen();
+      } else if (typeof target.msRequestFullscreen === 'function') {
+        target.msRequestFullscreen();
+      }
+    } catch {
+      // Fallback remains 100vw x 100vh fixed overlay inside Love Flix
+    }
+  }, []);
+
+  const exitNativeFullscreenIfActive = useCallback(() => {
+    try {
+      const orientation = screen.orientation as ScreenOrientation & {
+        unlock?: () => void;
+      };
+      orientation?.unlock?.();
+    } catch {}
+    try {
+      const fsDoc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        webkitExitFullscreen?: () => Promise<void> | void;
+      };
+      if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+        document.exitFullscreen().catch(() => {});
+      } else if (fsDoc.webkitFullscreenElement && typeof fsDoc.webkitExitFullscreen === 'function') {
+        fsDoc.webkitExitFullscreen();
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleToggleFullscreen = useCallback(() => {
+    const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+    if (document.fullscreenElement || fsDoc.webkitFullscreenElement) {
+      exitNativeFullscreenIfActive();
+    } else {
+      enterFullscreenElement(playerScreenRef.current);
+    }
+  }, [enterFullscreenElement, exitNativeFullscreenIfActive]);
 
   // Track media changes to trigger the official opening once per title / episode
   useEffect(() => {
@@ -407,6 +469,11 @@ export const StreamingPlayerModal: React.FC = () => {
         return;
       }
 
+      if (d.type === 'LOVEFLIX_TOGGLE_FULLSCREEN') {
+        handleToggleFullscreen();
+        return;
+      }
+
       if (d.type === 'LOVEFLIX_CLOSE_PLAYER') {
         handleClosePlayer();
         return;
@@ -416,6 +483,14 @@ export const StreamingPlayerModal: React.FC = () => {
         if (!effectiveIsPlayingIntro) {
           notifyIframeIntroEnded();
         }
+        try {
+          const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+          const isFsNow = Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
+          iframeRef.current?.contentWindow?.postMessage(
+            { type: 'LOVEFLIX_FULLSCREEN_STATE', fullscreen: isFsNow },
+            '*'
+          );
+        } catch {}
       }
 
       if (d.type === 'LOVEFLIX_PLAYER_READY' && isRoomConnected && iframeRef.current?.contentWindow) {
@@ -462,6 +537,7 @@ export const StreamingPlayerModal: React.FC = () => {
     activeAvailableChannels,
     effectiveIsPlayingIntro,
     getLiveRoomPositionSec,
+    handleToggleFullscreen,
     isRoomConnected,
     notifyIframeIntroEnded,
     switchPlayerChannel,
@@ -558,14 +634,30 @@ export const StreamingPlayerModal: React.FC = () => {
     resolvingActiveImdb,
   ]);
 
-  // Track browser native fullscreen changes and body scroll lock
+  // Track browser native fullscreen changes, sync iframe icon state, and body scroll lock
   useEffect(() => {
-    const onFullscreenChange = () => {
-      setIsNativeFullscreen(Boolean(document.fullscreenElement));
+    const syncFsState = () => {
+      const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
+      const isFs = Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
+      setIsNativeFullscreen(isFs);
+      try {
+        iframeRef.current?.contentWindow?.postMessage(
+          { type: 'LOVEFLIX_FULLSCREEN_STATE', fullscreen: isFs },
+          '*'
+        );
+      } catch {}
     };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('fullscreenchange', syncFsState);
+    document.addEventListener('webkitfullscreenchange', syncFsState);
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFsState);
+      document.removeEventListener('webkitfullscreenchange', syncFsState);
+    };
   }, []);
+
+  useEffect(() => {
+    setIframeFillZoom(false);
+  }, [activePlayer?.id, activePlayer?.channel, activePlayer?.season, activePlayer?.episode]);
 
   useEffect(() => {
     if (!watchRequest && !activePlayer) return;
@@ -585,35 +677,6 @@ export const StreamingPlayerModal: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [watchRequest, activePlayer, closeWatchModal]);
-
-  const enterFullscreenElement = (el: HTMLElement | null) => {
-    if (!el) return;
-    const target = el as HTMLElement & {
-      webkitRequestFullscreen?: () => Promise<void> | void;
-      msRequestFullscreen?: () => Promise<void> | void;
-    };
-    try {
-      if (typeof target.requestFullscreen === 'function') {
-        target.requestFullscreen().catch(() => {});
-      } else if (typeof target.webkitRequestFullscreen === 'function') {
-        target.webkitRequestFullscreen();
-      } else if (typeof target.msRequestFullscreen === 'function') {
-        target.msRequestFullscreen();
-      }
-    } catch {
-      // Fallback remains 100vw x 100vh fixed overlay inside Love Flix
-    }
-  };
-
-  const exitNativeFullscreenIfActive = () => {
-    try {
-      if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
-        document.exitFullscreen().catch(() => {});
-      }
-    } catch {
-      // ignore
-    }
-  };
 
   const handleSelectChannel = async (channel: 1 | 2 | 3) => {
     if (!watchRequest || sendingToRoom) return;
@@ -693,14 +756,6 @@ export const StreamingPlayerModal: React.FC = () => {
     closePlayerSession();
   };
 
-  const handleToggleFullscreen = () => {
-    if (document.fullscreenElement) {
-      exitNativeFullscreenIfActive();
-    } else {
-      enterFullscreenElement(playerScreenRef.current);
-    }
-  };
-
   // ==========================================================================
   // 1. FULLSCREEN IN-APP SUPERCDN PLAYER (100% Viewport + Native Fullscreen)
   // ==========================================================================
@@ -744,35 +799,37 @@ export const StreamingPlayerModal: React.FC = () => {
           }`
         : null;
 
-    const headerChannels =
-      activeAvailableChannels === null
-        ? CHANNELS.filter((ch) => ch.id === activePlayer.channel)
-        : CHANNELS.filter((ch) => activeAvailableChannels.includes(ch.id));
     const noPlayerChannelsAvailable =
       activeAvailableChannels !== null && activeAvailableChannels.length === 0;
 
     return (
       <div
         ref={playerScreenRef}
-        className="fixed inset-0 z-[100] w-screen h-screen bg-black flex flex-col select-none"
+        className="fixed inset-0 z-[100] w-screen h-[100dvh] bg-black flex flex-col select-none"
         role="dialog"
         aria-modal="true"
         aria-label={`Reproduzindo ${activePlayer.title}`}
       >
-        {/* Slim Cinema Control Header */}
-        <header className="h-12 px-3 sm:px-5 bg-[#080808] border-b border-white/[0.08] flex items-center justify-between gap-3 shrink-0 z-20">
-          <div className="flex items-center gap-3 min-w-0">
+        {/* Minimal corner overlay in fullscreen/landscape so 100% of video stays unobscured */}
+        <header
+          className={`h-11 sm:h-12 px-3 sm:px-5 flex items-center justify-between gap-3 shrink-0 z-30 ${
+            isNativeFullscreen
+              ? 'pointer-events-none absolute top-0 left-0 right-0 bg-transparent border-b-0'
+              : 'relative bg-[#080808] border-b border-white/[0.08] landscape:max-lg:pointer-events-none landscape:max-lg:absolute landscape:max-lg:top-0 landscape:max-lg:left-0 landscape:max-lg:right-0 landscape:max-lg:bg-transparent landscape:max-lg:border-b-0'
+          }`}
+        >
+          <div className="pointer-events-auto flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={handleClosePlayer}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#141414] hover:bg-[#E50914] text-white text-xs font-bold border border-white/10 transition-colors cursor-pointer shrink-0"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#141414]/80 hover:bg-[#E50914] text-white text-xs font-bold border border-white/15 transition-colors cursor-pointer shrink-0 backdrop-blur-md"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Fechar</span>
             </button>
 
-            <div className="min-w-0 hidden xs:block sm:block">
-              <p className="text-xs sm:text-sm font-bold text-white truncate">
+            <div className={`min-w-0 ${isNativeFullscreen ? 'hidden' : 'hidden lg:block'}`}>
+              <p className="text-xs sm:text-sm font-bold text-white truncate drop-shadow">
                 {activePlayer.title}
                 {episodeSubtitle ? (
                   <span className="text-[#A1A1A1] font-medium"> · {episodeSubtitle}</span>
@@ -781,28 +838,22 @@ export const StreamingPlayerModal: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {!noPlayerChannelsAvailable && headerChannels.length > 0 && (
-              <div className="flex items-center gap-1 p-1 rounded-xl bg-[#121212] border border-white/[0.08]">
-                {headerChannels.map((ch) => {
-                  const isSelected = activePlayer.channel === ch.id;
-                  return (
-                    <button
-                      key={ch.id}
-                      type="button"
-                      onClick={() => switchPlayerChannel(ch.id)}
-                      title={ch.label}
-                      className={`px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
-                        isSelected
-                          ? 'bg-[#E50914] text-white shadow'
-                          : 'text-[#A1A1A1] hover:text-white hover:bg-white/[0.06]'
-                      }`}
-                    >
-                      {ch.label}
-                    </button>
-                  );
-                })}
-              </div>
+          <div className="pointer-events-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {activePlayer.channel !== 1 && (
+              <button
+                type="button"
+                onClick={() => setIframeFillZoom((prev) => !prev)}
+                aria-label={iframeFillZoom ? 'Formato original' : 'Preencher tela'}
+                title={iframeFillZoom ? 'Restaurar formato original' : 'Preencher tela sem bordas'}
+                className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-xs font-bold transition-colors cursor-pointer backdrop-blur-md ${
+                  iframeFillZoom
+                    ? 'bg-[#E50914] border-[#FF253A] text-white'
+                    : 'bg-[#141414]/80 hover:bg-[#222222] border-white/15 text-white'
+                }`}
+              >
+                <Scan className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{iframeFillZoom ? 'Original' : 'Preencher'}</span>
+              </button>
             )}
 
             <button
@@ -810,7 +861,7 @@ export const StreamingPlayerModal: React.FC = () => {
               onClick={handleToggleFullscreen}
               aria-label={isNativeFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
               title={isNativeFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
-              className="w-8 h-8 rounded-lg bg-[#141414] hover:bg-[#222222] border border-white/10 text-white flex items-center justify-center transition-colors cursor-pointer"
+              className="w-8 h-8 rounded-lg bg-[#141414]/80 hover:bg-[#222222] border border-white/15 text-white flex items-center justify-center transition-colors cursor-pointer backdrop-blur-md"
             >
               {isNativeFullscreen ? (
                 <Minimize2 className="w-3.5 h-3.5" />
@@ -824,7 +875,7 @@ export const StreamingPlayerModal: React.FC = () => {
         {/* SuperCDN Official Container (#SuperCDNContainerVideo) */}
         <div
           id="SuperCDNContainerVideo"
-          className="relative flex-1 w-full h-full min-h-0 bg-black overflow-hidden"
+          className="relative flex-1 w-full h-full min-h-0 bg-black flex items-center justify-center overflow-hidden"
         >
           {/* Official Love Flix Opening Video with Sound */}
           {effectiveIsPlayingIntro && (
@@ -948,23 +999,31 @@ export const StreamingPlayerModal: React.FC = () => {
               </div>
             </div>
           ) : shouldMountIframe && streamSrc ? (
-            <iframe
-              ref={iframeRef}
-              key={streamIdentityKey}
-              src={streamSrc}
-              title={`${activePlayer.title} — Canal ${activePlayer.channel}`}
-              width="100%"
-              height="100%"
-              scrolling="no"
-              frameBorder="0"
-              referrerPolicy={activePlayer.channel === 2 ? 'no-referrer' : undefined}
-              onLoad={() => setIframeLoading(false)}
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
-              allowFullScreen
-              className={`w-full h-full border-0 bg-black ${
-                effectiveIsPlayingIntro ? 'pointer-events-none' : ''
-              }`}
-            />
+            <div
+              className={`relative flex items-center justify-center bg-black transition-transform duration-200 ${
+                isNativeFullscreen
+                  ? 'w-full h-full'
+                  : 'w-full aspect-video max-h-full landscape:aspect-auto landscape:h-full md:aspect-auto md:h-full'
+              } ${activePlayer.channel !== 1 && iframeFillZoom ? 'scale-[1.24]' : ''}`}
+            >
+              <iframe
+                ref={iframeRef}
+                key={streamIdentityKey}
+                src={streamSrc}
+                title={`${activePlayer.title} — Canal ${activePlayer.channel}`}
+                width="100%"
+                height="100%"
+                scrolling="no"
+                frameBorder="0"
+                referrerPolicy={activePlayer.channel === 2 ? 'no-referrer' : undefined}
+                onLoad={() => setIframeLoading(false)}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                allowFullScreen
+                className={`w-full h-full border-0 bg-black ${
+                  effectiveIsPlayingIntro ? 'pointer-events-none' : ''
+                }`}
+              />
+            </div>
           ) : null}
         </div>
       </div>

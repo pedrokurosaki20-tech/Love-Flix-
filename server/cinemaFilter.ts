@@ -1,5 +1,11 @@
 import { BROWSER_USER_AGENT, FALLBACK_SERVER_KEY } from './hlsEngine.js';
-import { getStreamBetterCatalogIndex, getSuperFlixCatalogIndex } from './catalogAvailability.js';
+import {
+  getStreamBetterCatalogIndex,
+  getSuperFlixCatalogIndex,
+  probeStreamBetterAvailable,
+  STREAMBETTER_PUBLIC_KEY,
+} from './catalogAvailability.js';
+import { checkMovieChannelOneAvailability } from './supercdnResolver.js';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const CACHE_TTL_MS = 15 * 60 * 1000;
@@ -22,8 +28,6 @@ let cachedCinemaState: CinemaFilterState | null = null;
 let inFlightCinemaCheck: Promise<CinemaFilterState> | null = null;
 const movieEvaluationCache = new Map<string, MovieEvaluationCacheEntry>();
 const inFlightEvaluations = new Map<string, Promise<MovieEvaluationCacheEntry>>();
-const channelProbeCache = new Map<string, { available: boolean; expiresAt: number }>();
-const CHANNEL_PROBE_TTL_MS = 5 * 60 * 1000;
 
 async function fetchTmdbList(endpoint: string, params: Record<string, string> = {}): Promise<any[]> {
   const apiKey = process.env.TMDB_API_KEY || FALLBACK_SERVER_KEY;
@@ -91,62 +95,29 @@ async function evaluateTmdbMovieDigitalRelease(
   return { isCinemaOnly: !isClassic, releaseDate };
 }
 
-async function probeChannelOne(tmdbId: string): Promise<boolean> {
-  const url = `https://vaiquecol.com/embed2/${encodeURIComponent(tmdbId)}`;
-  const cached = channelProbeCache.get(url);
-  if (cached && cached.expiresAt > Date.now()) return cached.available;
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': BROWSER_USER_AGENT,
-        Referer: 'https://plenoflu.com/',
-        Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
-      },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(3500),
-    });
-    const body = res.ok ? await res.text() : '';
-    const unavailable = /conte[uú]do\s+indispon[ií]vel|n[aã]o\s+encontrado|404\s+not\s+found/i.test(body);
-    const available = res.ok && !unavailable;
-    channelProbeCache.set(url, { available, expiresAt: Date.now() + CHANNEL_PROBE_TTL_MS });
-    return available;
-  } catch {
-    return false;
-  }
-}
-
 async function hasAnyWorkingChannel(tmdbId: string): Promise<boolean> {
-  const [catalog, sbCatalog, channel1] = await Promise.all([
+  const [catalog, sbCatalog] = await Promise.all([
     getSuperFlixCatalogIndex(),
     getStreamBetterCatalogIndex(),
-    probeChannelOne(tmdbId),
   ]);
-  const channel2 = catalog.loadedOk && catalog.movieTmdbIds.has(tmdbId);
-  if (channel1 || channel2) return true;
-  if (sbCatalog.loadedOk) {
-    return sbCatalog.movieIds.has(tmdbId);
-  }
-  return probeStreamBetter(tmdbId);
-}
 
-async function probeStreamBetter(tmdbId: string): Promise<boolean> {
-  const url = `https://streambetter.lol/filme/${encodeURIComponent(tmdbId)}`;
-  const cached = channelProbeCache.get(url);
-  if (cached && cached.expiresAt > Date.now()) return cached.available;
-  try {
-    const res = await fetch(`${url}?key=${encodeURIComponent('sb_pk_49d645d49ff1a48b6bba90db256a9ea5c308fd26acabb415')}`, {
-      headers: { 'User-Agent': BROWSER_USER_AGENT, Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(3500),
-    });
-    const body = res.ok ? await res.text() : '';
-    const unavailable = /content-unavailable-page|n[aã]o\s+conseguimos\s+tocar|conte[uú]do\s+indispon[ií]vel|n[aã]o\s+encontrado/i.test(body);
-    const available = res.ok && !unavailable;
-    channelProbeCache.set(url, { available, expiresAt: Date.now() + CHANNEL_PROBE_TTL_MS });
-    return available;
-  } catch {
-    return false;
+  // Instant Canal 2 catalog check
+  if (catalog.loadedOk && catalog.movieTmdbIds.has(tmdbId)) {
+    return true;
   }
+
+  // Canal 3 exact check (catalog + live embed verification)
+  const sbUrl = `https://streambetter.lol/filme/${encodeURIComponent(tmdbId)}?key=${STREAMBETTER_PUBLIC_KEY}`;
+  const shouldProbeSb = !sbCatalog.loadedOk || sbCatalog.movieIds.has(tmdbId);
+
+  const [ch1Ok, ch3Ok] = await Promise.all([
+    checkMovieChannelOneAvailability(tmdbId).catch(() => false),
+    shouldProbeSb
+      ? probeStreamBetterAvailable(sbUrl, { failOpen: false }).catch(() => false)
+      : Promise.resolve(false),
+  ]);
+
+  return ch1Ok || ch3Ok;
 }
 
 export async function getCinemaFilterState(): Promise<CinemaFilterState> {
