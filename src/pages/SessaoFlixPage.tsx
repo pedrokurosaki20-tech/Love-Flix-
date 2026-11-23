@@ -177,6 +177,9 @@ export const SessaoFlixPage: React.FC = () => {
   const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptedAutoRoomRef = useRef<string | null>(null);
 
+  const isStageFullscreenRef = useRef(false);
+  isStageFullscreenRef.current = isStageFullscreen;
+
   useEffect(() => {
     const syncFsState = () => {
       const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
@@ -189,11 +192,17 @@ export const SessaoFlixPage: React.FC = () => {
         );
       } catch {}
     };
+    const onNativeFsChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ fullscreen?: boolean }>).detail;
+      setIsStageFullscreen(Boolean(detail?.fullscreen));
+    };
     document.addEventListener('fullscreenchange', syncFsState);
     document.addEventListener('webkitfullscreenchange', syncFsState);
+    window.addEventListener('loveflix:native-fullscreen-changed', onNativeFsChanged);
     return () => {
       document.removeEventListener('fullscreenchange', syncFsState);
       document.removeEventListener('webkitfullscreenchange', syncFsState);
+      window.removeEventListener('loveflix:native-fullscreen-changed', onNativeFsChanged);
     };
   }, []);
 
@@ -202,6 +211,14 @@ export const SessaoFlixPage: React.FC = () => {
   }, [syncedMedia?.tmdbId, currentChannel, syncedMedia?.season, syncedMedia?.episode]);
 
   const toggleRoomStageFullscreen = useCallback(() => {
+    if (isAndroidNativeCanal2Available() && currentChannel === 2) {
+      const nextFs = !isStageFullscreenRef.current;
+      try {
+        window.LoveFlixNative?.setNativeFullscreen?.(nextFs);
+      } catch {}
+      return;
+    }
+
     const fsDoc = document as Document & {
       webkitFullscreenElement?: Element | null;
       webkitExitFullscreen?: () => Promise<void> | void;
@@ -245,7 +262,7 @@ export const SessaoFlixPage: React.FC = () => {
         el.msRequestFullscreen();
       }
     } catch {}
-  }, []);
+  }, [currentChannel]);
 
   const effectiveRoomImdb = useMemo(() => {
     if (syncedMedia?.imdbId && /^tt\d+/i.test(syncedMedia.imdbId)) {
@@ -1377,6 +1394,7 @@ export const SessaoFlixPage: React.FC = () => {
     return () => {
       try {
         window.LoveFlixNative?.closeCanal2?.();
+        window.LoveFlixNative?.setNativeFullscreen?.(false);
       } catch {}
     };
   }, []);
@@ -1428,10 +1446,10 @@ export const SessaoFlixPage: React.FC = () => {
             <div
               id="SuperCDNContainerVideo"
               ref={videoStageRef}
-              className={`relative flex items-center justify-center overflow-hidden bg-black ${
+              className={`flex items-center justify-center overflow-hidden bg-black ${
                 isStageFullscreen
-                  ? 'w-screen h-screen max-h-none'
-                  : 'w-full aspect-video max-h-[38dvh] sm:max-h-[42dvh] shrink-0 lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0'
+                  ? 'fixed inset-0 z-50 w-screen h-[100dvh] max-h-none'
+                  : 'relative w-full aspect-video max-h-[38dvh] sm:max-h-[42dvh] shrink-0 lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0'
               }`}
             >
               {/* Official Love Flix Opening Video with Sound (identical to StreamingPlayerModal) */}

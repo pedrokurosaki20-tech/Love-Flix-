@@ -11,6 +11,56 @@ object Canal2Automation {
             lower.startsWith("http://superflixapi.")
     }
 
+    fun buildEmbedWrapperHtml(targetUrl: String): String {
+        val safeSrc = targetUrl
+            .replace("&", "&amp;")
+            .replace("\"", "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+
+        return """
+            <!DOCTYPE html>
+            <html lang="pt-BR">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+              <style>
+                html, body {
+                  margin: 0;
+                  padding: 0;
+                  width: 100%;
+                  height: 100%;
+                  background: #000000;
+                  overflow: hidden;
+                }
+                iframe {
+                  position: fixed;
+                  inset: 0;
+                  width: 100%;
+                  height: 100%;
+                  border: 0;
+                  display: block;
+                  background: #000000;
+                }
+              </style>
+            </head>
+            <body>
+              <iframe
+                id="sfFrame"
+                src="$safeSrc"
+                referrerpolicy="no-referrer"
+                scrolling="no"
+                frameborder="0"
+                allow="autoplay *; encrypted-media *; picture-in-picture *; fullscreen *; clipboard-write *; accelerometer *; gyroscope *"
+                allowfullscreen
+                webkitallowfullscreen
+                mozallowfullscreen>
+              </iframe>
+            </body>
+            </html>
+        """.trimIndent()
+    }
+
     fun buildDocumentStartScript(initialAudioPref: String, initialIntroActive: Boolean): String {
         val safeAudio = if (initialAudioPref == "original") "original" else "pt"
         val introBool = if (initialIntroActive) "true" else "false"
@@ -33,9 +83,62 @@ object Canal2Automation {
                     }
                     window.__lfCanal2Injected = true;
 
-                    var isTop = (window === window.top);
+                    var isWrapperFrame = (window === window.top && host === 'love-flix.vercel.app');
+                    var isControlFrame = (host.indexOf('superflixapi') !== -1);
+
                     window.__LF_AUDIO_PREF = ${JSONObject.quote(safeAudio)};
                     window.__LF_INTRO_PLAYING = $introBool;
+
+                    if (isWrapperFrame) {
+                        function pushStateToChildren() {
+                            var frames = document.querySelectorAll('iframe');
+                            for (var i = 0; i < frames.length; i++) {
+                                try {
+                                    frames[i].contentWindow.postMessage({
+                                        type: 'LF_CANAL2_STATE',
+                                        introPlaying: !!window.__LF_INTRO_PLAYING,
+                                        audioPref: window.__LF_AUDIO_PREF
+                                    }, '*');
+                                } catch (e) {}
+                            }
+                        }
+
+                        window.__lfSetIntroState = function(active) {
+                            window.__LF_INTRO_PLAYING = !!active;
+                            pushStateToChildren();
+                        };
+
+                        window.__lfSetAudioPref = function(pref) {
+                            window.__LF_AUDIO_PREF = (pref === 'original') ? 'original' : 'pt';
+                            pushStateToChildren();
+                        };
+
+                        window.addEventListener('message', function(ev) {
+                            var d = ev && ev.data;
+                            if (!d || typeof d !== 'object') return;
+                            if (d.type === 'LF_CANAL2_QUERY_STATE') {
+                                try {
+                                    ev.source && ev.source.postMessage({
+                                        type: 'LF_CANAL2_STATE',
+                                        introPlaying: !!window.__LF_INTRO_PLAYING,
+                                        audioPref: window.__LF_AUDIO_PREF
+                                    }, '*');
+                                } catch (e) {}
+                            } else if (d.type === 'LF_CANAL2_VIDEO_ALIVE') {
+                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onVideoAlive(); } catch (e) {}
+                                var sf = document.getElementById('sfFrame');
+                                try { sf && sf.contentWindow && sf.contentWindow.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
+                            } else if (d.type === 'LF_CANAL2_CHALLENGE_VISIBLE') {
+                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onChallengeVisible(); } catch (e) {}
+                            } else if (d.type === 'LF_CANAL2_UNAVAILABLE') {
+                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
+                            } else if (d.type === 'LF_CANAL2_IFRAME_ERROR') {
+                                var sf2 = document.getElementById('sfFrame');
+                                try { sf2 && sf2.contentWindow && sf2.contentWindow.postMessage({ type: 'LF_CANAL2_IFRAME_ERROR' }, '*'); } catch (e) {}
+                            }
+                        });
+                        return;
+                    }
 
                     // 1. Block popups / new tabs inside player and subframes
                     try {
@@ -60,7 +163,7 @@ object Canal2Automation {
                                 '  opacity: 0 !important;',
                                 '  visibility: hidden !important;',
                                 '  pointer-events: none !important;',
-                                '}',
+                                '}'
                             ].join('\n');
                             var target = document.head || document.documentElement;
                             if (target) target.appendChild(style);
@@ -128,7 +231,7 @@ object Canal2Automation {
                         } catch (e) {}
                     }
 
-                    // 3. Intro Mute / Resume Sync across top frame & all subframes
+                    // 3. Intro Mute / Resume Sync across control frame & nested player frames
                     var heldVideos = [];
                     function enforceIntroMediaState() {
                         var active = !!window.__LF_INTRO_PLAYING;
@@ -141,6 +244,7 @@ object Canal2Automation {
                                     try { m.pause(); } catch (e) {}
                                     if (heldVideos.indexOf(m) === -1) heldVideos.push(m);
                                 }
+                                if (m.dataset) m.dataset.lfIntroMuted = '1';
                             } else {
                                 if (m.dataset && m.dataset.lfIntroMuted === '1') {
                                     m.muted = false;
@@ -150,44 +254,31 @@ object Canal2Automation {
                                     try { m.play(); } catch (e) {}
                                 }
                             }
-                            if (active && m.dataset) {
-                                m.dataset.lfIntroMuted = '1';
-                            }
                         }
                         if (!active) heldVideos = [];
                     }
 
-                    function broadcastIntroStateToIframes(active) {
+                    function broadcastStateToIframes() {
                         var frames = document.querySelectorAll('iframe');
                         for (var i = 0; i < frames.length; i++) {
                             try {
                                 frames[i].contentWindow.postMessage({
-                                    type: 'LF_CANAL2_INTRO_STATE',
-                                    active: !!active
+                                    type: 'LF_CANAL2_STATE',
+                                    introPlaying: !!window.__LF_INTRO_PLAYING,
+                                    audioPref: window.__LF_AUDIO_PREF
                                 }, '*');
                             } catch (e) {}
                         }
                     }
-
-                    window.__lfSetIntroState = function(active) {
-                        window.__LF_INTRO_PLAYING = !!active;
-                        enforceIntroMediaState();
-                        broadcastIntroStateToIframes(!!active);
-                    };
-
-                    window.__lfSetAudioPref = function(pref) {
-                        window.__LF_AUDIO_PREF = (pref === 'original') ? 'original' : 'pt';
-                    };
 
                     // Watch media elements for alive state & intro hold
                     var reportedAlive = false;
                     function reportVideoAlive() {
                         if (reportedAlive) return;
                         reportedAlive = true;
-                        if (isTop) {
-                            try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onVideoAlive(); } catch (e) {}
-                        } else {
-                            try { window.top.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
+                        try { window.top.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
+                        if (!isControlFrame) {
+                            try { window.parent.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
                         }
                     }
 
@@ -225,35 +316,12 @@ object Canal2Automation {
                         enforceIntroMediaState();
                     }
 
-                    if (!isTop) {
-                        try {
-                            window.top.postMessage({ type: 'LF_CANAL2_QUERY_INTRO' }, '*');
-                        } catch (e) {}
-                    }
+                    // Request authoritative state from top wrapper frame
+                    try {
+                        window.top.postMessage({ type: 'LF_CANAL2_QUERY_STATE' }, '*');
+                    } catch (e) {}
 
-                    window.addEventListener('message', function(ev) {
-                        var d = ev && ev.data;
-                        if (!d || typeof d !== 'object') return;
-                        if (d.type === 'LF_CANAL2_INTRO_STATE') {
-                            window.__LF_INTRO_PLAYING = !!d.active;
-                            enforceIntroMediaState();
-                        } else if (isTop && d.type === 'LF_CANAL2_QUERY_INTRO') {
-                            try {
-                                ev.source && ev.source.postMessage({
-                                    type: 'LF_CANAL2_INTRO_STATE',
-                                    active: !!window.__LF_INTRO_PLAYING
-                                }, '*');
-                            } catch (e) {}
-                        } else if (isTop && d.type === 'LF_CANAL2_VIDEO_ALIVE') {
-                            window.__lfPlaybackConfirmed = true;
-                            clearTriedServers();
-                            reportVideoAlive();
-                        } else if (isTop && d.type === 'LF_CANAL2_IFRAME_ERROR') {
-                            window.__lfSubframeError = true;
-                        }
-                    });
-
-                    // 4. Top-frame Automation: Wait Turnstile -> Audio Pref -> Server Priority
+                    // 4. Control-Frame Automation: Turnstile -> Audio Pref -> Server Priority
                     var STORAGE_KEY = 'lf_c2_tried_' + (location.pathname || '');
                     function getTriedServers() {
                         try {
@@ -276,6 +344,37 @@ object Canal2Automation {
                     function clearTriedServers() {
                         try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
                     }
+
+                    window.addEventListener('message', function(ev) {
+                        var d = ev && ev.data;
+                        if (!d || typeof d !== 'object') return;
+                        if (d.type === 'LF_CANAL2_STATE') {
+                            window.__LF_INTRO_PLAYING = !!d.introPlaying;
+                            if (d.audioPref === 'original' || d.audioPref === 'pt') {
+                                window.__LF_AUDIO_PREF = d.audioPref;
+                            }
+                            enforceIntroMediaState();
+                            broadcastStateToIframes();
+                        } else if (d.type === 'LF_CANAL2_INTRO_STATE') {
+                            window.__LF_INTRO_PLAYING = !!d.active;
+                            enforceIntroMediaState();
+                            broadcastStateToIframes();
+                        } else if (isControlFrame && d.type === 'LF_CANAL2_QUERY_STATE') {
+                            try {
+                                ev.source && ev.source.postMessage({
+                                    type: 'LF_CANAL2_STATE',
+                                    introPlaying: !!window.__LF_INTRO_PLAYING,
+                                    audioPref: window.__LF_AUDIO_PREF
+                                }, '*');
+                            } catch (e) {}
+                        } else if (isControlFrame && d.type === 'LF_CANAL2_VIDEO_ALIVE') {
+                            window.__lfPlaybackConfirmed = true;
+                            clearTriedServers();
+                            reportVideoAlive();
+                        } else if (isControlFrame && d.type === 'LF_CANAL2_IFRAME_ERROR') {
+                            window.__lfSubframeError = true;
+                        }
+                    });
 
                     function isVisibleEl(el) {
                         if (!el) return false;
@@ -322,6 +421,68 @@ object Canal2Automation {
                         return false;
                     }
 
+                    function getClickableNodes() {
+                        var sel = 'button, a, [role="button"], li, div[onclick], span[onclick], [data-server], [data-player], [data-id], [data-lang], [data-audio], [class*="server" i], [class*="player" i], [class*="audio" i], [class*="lang" i], [class*="btn" i]';
+                        var raw = document.querySelectorAll(sel);
+                        var out = [];
+                        for (var i = 0; i < raw.length; i++) {
+                            var el = raw[i];
+                            if (!isVisibleEl(el)) continue;
+                            var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                            if (!txt || txt.length > 55) continue;
+                            out.push({ el: el, text: txt, lower: txt.toLowerCase() });
+                        }
+                        return out;
+                    }
+
+                    function hasDirectPlayerMounted() {
+                        var v = document.querySelector('video');
+                        if (v && (v.readyState >= 2 || v.currentSrc || v.src)) return true;
+                        var iframes = document.querySelectorAll('iframe');
+                        for (var i = 0; i < iframes.length; i++) {
+                            var s = (iframes[i].getAttribute('src') || '').toLowerCase();
+                            if (s && s.indexOf('cloudflare') === -1 && s.indexOf('about:blank') === -1) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+
+                    function findServerCandidates(nodes) {
+                        var candidates = [];
+                        for (var i = 0; i < nodes.length; i++) {
+                            var n = nodes[i];
+                            if (isDisabledEl(n.el)) continue;
+                            if (/^(dublado|legendado|original|voltar|reportar|fechar|tentar novamente|copiar)$/i.test(n.lower)) continue;
+
+                            var priority = 99;
+                            if (/servidor\s*principal|\bprincipal\b|player\s*1\b|servidor\s*1\b/.test(n.lower)) {
+                                priority = 1;
+                            } else if (/servidor\s*alternativo|\balternativo\b|servidor\s*2\b|player\s*2\b|\bbackup\b|secund[aá]rio/.test(n.lower)) {
+                                priority = 2;
+                            } else if (/(servidor|player|streamtape|filemoon|mixdrop|dood|vidhide|embed|op[cç][aã]o\s*\d)/.test(n.lower)) {
+                                priority = 3;
+                            }
+                            if (priority < 99) {
+                                candidates.push({ el: n.el, key: n.lower, priority: priority, order: i });
+                            }
+                        }
+                        candidates.sort(function(a, b) {
+                            if (a.priority !== b.priority) return a.priority - b.priority;
+                            return a.order - b.order;
+                        });
+                        return candidates;
+                    }
+
+                    function findBackButton(nodes) {
+                        for (var i = 0; i < nodes.length; i++) {
+                            if (/^(voltar|trocar servidor|servidores)$/i.test(nodes[i].lower) || /\bvoltar\b/.test(nodes[i].lower)) {
+                                return nodes[i].el;
+                            }
+                        }
+                        return null;
+                    }
+
                     function hasTurnstileGate() {
                         var cfFrame = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
                         if (cfFrame && isVisibleEl(cfFrame)) {
@@ -341,6 +502,9 @@ object Canal2Automation {
                     function hasExplicitUnavailablePage() {
                         var txt = ((document.body && document.body.innerText) || '').trim();
                         if (!txt) return false;
+                        if (/acesso\s+restrito[\s\S]*visualiza[cç][aã]o\s+externa/i.test(txt)) {
+                            return true;
+                        }
                         var hasPlayerOrBtns = !!document.querySelector('video, iframe:not([src*="cloudflare"]), button');
                         if (!hasPlayerOrBtns && /\b404\b.*not\s*found|conte[uú]do\s+(n[aã]o\s+encontrado|indispon[ií]vel)/i.test(txt)) {
                             return true;
@@ -348,18 +512,9 @@ object Canal2Automation {
                         return false;
                     }
 
-                    function getClickableNodes() {
-                        var sel = 'button, a, [role="button"], li, div[onclick], span[onclick], [data-server], [data-player], [data-id], [data-lang], [data-audio], [class*="server" i], [class*="player" i], [class*="audio" i], [class*="lang" i], [class*="btn" i]';
-                        var raw = document.querySelectorAll(sel);
-                        var out = [];
-                        for (var i = 0; i < raw.length; i++) {
-                            var el = raw[i];
-                            if (!isVisibleEl(el)) continue;
-                            var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-                            if (!txt || txt.length > 55) continue;
-                            out.push({ el: el, text: txt, lower: txt.toLowerCase() });
-                        }
-                        return out;
+                    function hasPlayerErrorBanner() {
+                        var txt = ((document.body && document.body.innerText) || '').toLowerCase();
+                        return /(servidor\s+indispon[ií]vel|erro\s+ao\s+carregar|n[aã]o\s+foi\s+poss[ií]vel\s+reproduzir|tente\s+outro\s+servidor|file\s+was\s+deleted|video\s+not\s+found|404\s+not\s+found)/.test(txt);
                     }
 
                     var audioHandled = false;
@@ -378,7 +533,7 @@ object Canal2Automation {
                         var origNodes = [];
                         for (var i = 0; i < nodes.length; i++) {
                             var n = nodes[i];
-                            if (/servidor|player|voltar|reportar|fechar|tentar/i.test(n.lower)) continue;
+                            if (/servidor|player|voltar|reportar|fechar|tentar|copiar/i.test(n.lower)) continue;
                             if (/^(dublado|portugu[eê]s|pt-?br|dub)(\s+.*)?$/i.test(n.lower) || /\bdublado\b/.test(n.lower)) {
                                 if (!isDisabledEl(n.el)) dubNodes.push(n);
                             } else if (/^(legendado|original|leg)(\s+.*)?$/i.test(n.lower) || /\blegendado\b/.test(n.lower)) {
@@ -387,7 +542,6 @@ object Canal2Automation {
                         }
 
                         if (dubNodes.length === 0 && origNodes.length === 0) {
-                            // Only skip audio selection if servers or a player are already rendered without audio toggles
                             if (findServerCandidates(nodes).length > 0 || hasDirectPlayerMounted()) {
                                 audioHandled = true;
                             }
@@ -424,82 +578,35 @@ object Canal2Automation {
                         return false;
                     }
 
-                    function findServerCandidates(nodes) {
-                        var candidates = [];
-                        for (var i = 0; i < nodes.length; i++) {
-                            var n = nodes[i];
-                            if (isDisabledEl(n.el)) continue;
-                            if (/^(dublado|legendado|original|voltar|reportar|fechar|tentar novamente)$/i.test(n.lower)) continue;
-
-                            var priority = 99;
-                            if (/servidor\s*principal|\bprincipal\b|player\s*1\b|servidor\s*1\b/.test(n.lower)) {
-                                priority = 1;
-                            } else if (/servidor\s*alternativo|\balternativo\b|servidor\s*2\b|player\s*2\b|\bbackup\b|secund[aá]rio/.test(n.lower)) {
-                                priority = 2;
-                            } else if (/(servidor|player|streamtape|filemoon|mixdrop|dood|vidhide|embed|op[cç][aã]o\s*\d)/.test(n.lower)) {
-                                priority = 3;
-                            }
-                            if (priority < 99) {
-                                candidates.push({ el: n.el, key: n.lower, priority: priority, order: i });
-                            }
-                        }
-                        candidates.sort(function(a, b) {
-                            if (a.priority !== b.priority) return a.priority - b.priority;
-                            return a.order - b.order;
-                        });
-                        return candidates;
-                    }
-
-                    function findBackButton(nodes) {
-                        for (var i = 0; i < nodes.length; i++) {
-                            if (/^(voltar|trocar servidor|servidores)$/i.test(nodes[i].lower) || /\bvoltar\b/.test(nodes[i].lower)) {
-                                return nodes[i].el;
-                            }
-                        }
-                        return null;
-                    }
-
-                    function hasDirectPlayerMounted() {
-                        var v = document.querySelector('video');
-                        if (v && (v.readyState >= 2 || v.currentSrc || v.src)) return true;
-                        var iframes = document.querySelectorAll('iframe');
-                        for (var i = 0; i < iframes.length; i++) {
-                            var s = (iframes[i].getAttribute('src') || '').toLowerCase();
-                            if (s && s.indexOf('cloudflare') === -1 && s.indexOf('about:blank') === -1) {
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
-
-                    function hasPlayerErrorBanner() {
-                        var txt = ((document.body && document.body.innerText) || '').toLowerCase();
-                        return /(servidor\s+indispon[ií]vel|erro\s+ao\s+carregar|n[aã]o\s+foi\s+poss[ií]vel\s+reproduzir|tente\s+outro\s+servidor|file\s+was\s+deleted|video\s+not\s+found|404\s+not\s+found)/.test(txt);
+                    function notifyUnavailable() {
+                        if (unavailableNotified) return;
+                        unavailableNotified = true;
+                        clearTriedServers();
+                        try { window.top.postMessage({ type: 'LF_CANAL2_UNAVAILABLE' }, '*'); } catch (e) {}
                     }
 
                     function checkSubframeHealth() {
-                        if (isTop || subframeErrorSent || reportedAlive) return;
+                        if (isControlFrame || subframeErrorSent || reportedAlive) return;
                         if (!document.querySelector('video') && hasPlayerErrorBanner()) {
                             subframeErrorSent = true;
+                            try { window.parent.postMessage({ type: 'LF_CANAL2_IFRAME_ERROR' }, '*'); } catch (e) {}
                             try { window.top.postMessage({ type: 'LF_CANAL2_IFRAME_ERROR' }, '*'); } catch (e) {}
                         }
                     }
 
-                    function runTopAutomationTick() {
-                        if (!isTop || unavailableNotified) return;
+                    function runControlAutomationTick() {
+                        if (!isControlFrame || unavailableNotified) return;
 
                         if (hasTurnstileGate()) {
                             if (!challengeNotified) {
                                 challengeNotified = true;
-                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onChallengeVisible(); } catch (e) {}
+                                try { window.top.postMessage({ type: 'LF_CANAL2_CHALLENGE_VISIBLE' }, '*'); } catch (e) {}
                             }
                             return;
                         }
 
                         if (hasExplicitUnavailablePage()) {
-                            unavailableNotified = true;
-                            clearTriedServers();
-                            try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
+                            notifyUnavailable();
                             return;
                         }
 
@@ -532,9 +639,7 @@ object Canal2Automation {
                                     location.reload();
                                     return;
                                 } else {
-                                    unavailableNotified = true;
-                                    clearTriedServers();
-                                    try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
+                                    notifyUnavailable();
                                     return;
                                 }
                             }
@@ -549,9 +654,7 @@ object Canal2Automation {
                                 }
                             }
                             if (!nextServer) {
-                                unavailableNotified = true;
-                                clearTriedServers();
-                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
+                                notifyUnavailable();
                                 return;
                             }
                             activeServerKey = nextServer.key;
@@ -574,11 +677,10 @@ object Canal2Automation {
                         }
                     }
 
-                    // Boot observer + polling loop
                     function startLoop() {
                         cleanBrandingAndOverlays(document);
                         wireMediaWatchers();
-                        if (isTop) runTopAutomationTick();
+                        if (isControlFrame) runControlAutomationTick();
                         else checkSubframeHealth();
                     }
 
@@ -599,7 +701,7 @@ object Canal2Automation {
                     setInterval(function() {
                         cleanBrandingAndOverlays(document);
                         wireMediaWatchers();
-                        if (isTop) runTopAutomationTick();
+                        if (isControlFrame) runControlAutomationTick();
                         else checkSubframeHealth();
                     }, 450);
                 } catch (err) {}

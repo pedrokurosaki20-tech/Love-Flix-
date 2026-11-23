@@ -17,6 +17,7 @@ export interface LoveFlixNativeBridge {
   ) => void;
   updateCanal2Bounds?: (boundsJson: string) => void;
   setCanal2IntroActive?: (introPlaying: boolean) => void;
+  setNativeFullscreen?: (fullscreen: boolean) => void;
   closeCanal2?: () => void;
 }
 

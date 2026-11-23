@@ -55,6 +55,7 @@ class MainActivity : AppCompatActivity() {
     // Dedicated Native Canal 2 Player State
     private var canal2Active = false
     private var canal2IntroPlaying = false
+    private var canal2NativeFullscreen = false
     private var canal2AudioPref = "pt"
     private var canal2LastBoundsJson = "{}"
     private var canal2DocStartScript: ScriptHandler? = null
@@ -81,6 +82,12 @@ class MainActivity : AppCompatActivity() {
         setupWebView()
         setupCanal2WebView()
         setupBackNavigation()
+
+        binding.webView.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            if (canal2Active && ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop))) {
+                applyCanal2Bounds(canal2LastBoundsJson)
+            }
+        }
 
         binding.retryButton.setOnClickListener {
             hasMainFrameError = false
@@ -408,9 +415,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (request.isForMainFrame) {
                     val host = uri.host?.lowercase() ?: return true
+                    val isWrapperHost = host == "love-flix.vercel.app"
                     val isSuperFlix = host.contains("superflixapi")
                     val isCloudflare = host.contains("challenges.cloudflare.com")
-                    if (!isSuperFlix && !isCloudflare) {
+                    if (!isWrapperHost && !isSuperFlix && !isCloudflare) {
                         return true
                     }
                 }
@@ -558,6 +566,12 @@ class MainActivity : AppCompatActivity() {
     private fun closeCanal2Native() {
         canal2Active = false
         canal2IntroPlaying = false
+        if (canal2NativeFullscreen) {
+            canal2NativeFullscreen = false
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            configureSystemBars(fullscreen = false)
+            binding.canal2FullscreenBtn.text = "Tela cheia"
+        }
         canal2DocStartScript?.remove()
         canal2DocStartScript = null
         binding.canal2Container.passThroughTouches = false
@@ -598,7 +612,14 @@ class MainActivity : AppCompatActivity() {
                 canal2IntroPlaying = introPlaying
                 refreshCanal2DocumentStartScript()
                 applyCanal2Bounds(boundsJson)
-                binding.canal2WebView.loadUrl(url)
+                val wrapperHtml = Canal2Automation.buildEmbedWrapperHtml(url)
+                binding.canal2WebView.loadDataWithBaseURL(
+                    "https://love-flix.vercel.app/",
+                    wrapperHtml,
+                    "text/html",
+                    "utf-8",
+                    null
+                )
             }
         }
 
@@ -617,6 +638,25 @@ class MainActivity : AppCompatActivity() {
                 val jsFlag = if (introPlaying) "true" else "false"
                 binding.canal2WebView.evaluateJavascript(
                     "window.__lfSetIntroState && window.__lfSetIntroState($jsFlag);",
+                    null
+                )
+            }
+        }
+
+        @JavascriptInterface
+        fun setNativeFullscreen(fullscreen: Boolean) {
+            runOnUiThread {
+                canal2NativeFullscreen = fullscreen
+                requestedOrientation = if (fullscreen) {
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                } else {
+                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
+                configureSystemBars(fullscreen = fullscreen)
+                binding.canal2FullscreenBtn.text = if (fullscreen) "Sair tela cheia" else "Tela cheia"
+                val jsFlag = if (fullscreen) "true" else "false"
+                binding.webView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('loveflix:native-fullscreen-changed', { detail: { fullscreen: $jsFlag } }));",
                     null
                 )
             }
@@ -750,7 +790,7 @@ class MainActivity : AppCompatActivity() {
             }
             binding.splashVideoView.start()
         }
-        if (customFullscreenView != null) {
+        if (customFullscreenView != null || canal2NativeFullscreen) {
             configureSystemBars(fullscreen = true)
         }
     }

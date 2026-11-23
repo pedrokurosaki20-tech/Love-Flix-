@@ -96,6 +96,8 @@ export const StreamingPlayerModal: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nativeCanal2ActiveKeyRef = useRef<string | null>(null);
+  const isNativeFullscreenRef = useRef(false);
+  isNativeFullscreenRef.current = isNativeFullscreen;
 
   // Official Love Flix Opening Intro State
   const [isPlayingIntro, setIsPlayingIntro] = useState(false);
@@ -197,13 +199,20 @@ export const StreamingPlayerModal: React.FC = () => {
   }, []);
 
   const handleToggleFullscreen = useCallback(() => {
+    if (isAndroidNativeCanal2Available() && activePlayer?.channel === 2) {
+      const nextFs = !isNativeFullscreenRef.current;
+      try {
+        window.LoveFlixNative?.setNativeFullscreen?.(nextFs);
+      } catch {}
+      return;
+    }
     const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
     if (document.fullscreenElement || fsDoc.webkitFullscreenElement) {
       exitNativeFullscreenIfActive();
     } else {
       enterFullscreenElement(playerScreenRef.current);
     }
-  }, [enterFullscreenElement, exitNativeFullscreenIfActive]);
+  }, [activePlayer?.channel, enterFullscreenElement, exitNativeFullscreenIfActive]);
 
   // Track media changes to trigger the official opening once per title / episode
   useEffect(() => {
@@ -654,11 +663,17 @@ export const StreamingPlayerModal: React.FC = () => {
         );
       } catch {}
     };
+    const onNativeFsChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ fullscreen?: boolean }>).detail;
+      setIsNativeFullscreen(Boolean(detail?.fullscreen));
+    };
     document.addEventListener('fullscreenchange', syncFsState);
     document.addEventListener('webkitfullscreenchange', syncFsState);
+    window.addEventListener('loveflix:native-fullscreen-changed', onNativeFsChanged);
     return () => {
       document.removeEventListener('fullscreenchange', syncFsState);
       document.removeEventListener('webkitfullscreenchange', syncFsState);
+      window.removeEventListener('loveflix:native-fullscreen-changed', onNativeFsChanged);
     };
   }, []);
 
@@ -744,7 +759,13 @@ export const StreamingPlayerModal: React.FC = () => {
       });
     });
 
-    enterFullscreenElement(playerScreenRef.current);
+    if (isAndroidNativeCanal2Available() && effectiveChannel === 2) {
+      try {
+        window.LoveFlixNative?.setNativeFullscreen?.(true);
+      } catch {}
+    } else {
+      enterFullscreenElement(playerScreenRef.current);
+    }
   };
 
   const handleClosePlayer = useCallback(() => {
@@ -757,9 +778,11 @@ export const StreamingPlayerModal: React.FC = () => {
     }
     try {
       window.LoveFlixNative?.closeCanal2?.();
+      window.LoveFlixNative?.setNativeFullscreen?.(false);
     } catch {}
     nativeCanal2ActiveKeyRef.current = null;
     setIsPlayingIntro(false);
+    setIsNativeFullscreen(false);
     lastIntroContentKeyRef.current = null;
     waitIntroStreamKeyRef.current = null;
     waitIntroFlagRef.current = false;
@@ -778,7 +801,9 @@ export const StreamingPlayerModal: React.FC = () => {
   const shouldShowNativeFloatingControls = useCallback(() => {
     if (typeof window === 'undefined') return false;
     const fsDoc = document as Document & { webkitFullscreenElement?: Element | null };
-    const isFs = Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
+    const isFs =
+      isNativeFullscreenRef.current ||
+      Boolean(document.fullscreenElement || fsDoc.webkitFullscreenElement);
     const isLandscapeMobile = window.innerWidth > window.innerHeight && window.innerWidth < 1024;
     return isFs || isLandscapeMobile;
   }, []);
