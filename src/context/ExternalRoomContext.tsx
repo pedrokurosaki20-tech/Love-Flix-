@@ -67,8 +67,17 @@ export interface CreateRoomOptions {
   initialWelcomeMessage?: string;
 }
 
+const SYSTEM_NOTICE_PEER_ID = 'system:notice';
+
+export interface LivePlaybackSnapshot {
+  positionSec: number;
+  paused: boolean;
+  playbackRate: number;
+}
+
 interface ExternalRoomContextValue {
   peerId: string;
+  isHost: boolean;
   isConnected: boolean;
   isPickerMode: boolean;
   connecting: boolean;
@@ -94,6 +103,7 @@ interface ExternalRoomContextValue {
     paused: boolean;
     playbackRate?: number;
   }) => void;
+  registerLivePlaybackGetter: (getter: (() => LivePlaybackSnapshot | null) | null) => void;
   sendChatMessage: (text: string) => void;
   sendReaction: (emoji: string) => void;
   getLiveRoomPositionSec: (overridePlayback?: ExternalRoomPlayback | null) => number;
@@ -227,6 +237,23 @@ function normalizeRoomCode(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').toUpperCase();
 }
 
+function appendUniqueChatMessage(prev: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
+  if (!incoming?.id || !incoming.text) return prev;
+  if (prev.some((m) => m.id === incoming.id)) return prev;
+  if (
+    incoming.peerId === SYSTEM_NOTICE_PEER_ID &&
+    prev.some(
+      (m) =>
+        m.peerId === SYSTEM_NOTICE_PEER_ID &&
+        m.text === incoming.text &&
+        Math.abs(m.createdAtMs - incoming.createdAtMs) < 12_000
+    )
+  ) {
+    return prev;
+  }
+  return [...prev.slice(-60), incoming];
+}
+
 function mergePeersLists(
   presencePeers: ExternalRoomPeer[],
   serverPeers: ExternalRoomPeer[]
@@ -318,8 +345,9 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const serverPeersRef = useRef<ExternalRoomPeer[]>(initialSnapshot?.peers || []);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const pendingChatMessagesRef = useRef<
-    Array<{ id: string; roomId: string; text: string; createdAtMs: number }>
+    Array<{ id: string; roomId: string; text: string; createdAtMs: number; peerId?: string; peerName?: string }>
   >([]);
+  const livePlaybackGetterRef = useRef<(() => LivePlaybackSnapshot | null) | null>(null);
   const applyingRemoteMediaRef = useRef<boolean>(false);
   const activePlayerRef = useRef(activePlayer);
   activePlayerRef.current = activePlayer;
@@ -490,12 +518,24 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         setChatMessages((current) => {
           const byId = new Map<string, ChatMessage>();
           for (const m of snapshot.chatMessages!) {
-            if (m?.id) byId.set(m.id, m);
+            if (!m?.id) continue;
+            if (
+              m.peerId === SYSTEM_NOTICE_PEER_ID &&
+              Array.from(byId.values()).some(
+                (existing) =>
+                  existing.peerId === SYSTEM_NOTICE_PEER_ID &&
+                  existing.text === m.text &&
+                  Math.abs(existing.createdAtMs - m.createdAtMs) < 12_000
+              )
+            ) {
+              continue;
+            }
+            byId.set(m.id, m);
           }
           for (const m of current) {
             if (!m?.id) continue;
             if (!byId.has(m.id)) {
-              const dup = snapshot.chatMessages!.some(
+              const dup = Array.from(byId.values()).some(
                 (rm) =>
                   rm.peerId === m.peerId &&
                   rm.text === m.text &&
@@ -518,6 +558,82 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       }
     },
     [applyAuthoritativeMedia, applyAuthoritativePlayback, syncedMedia]
+  );
+
+  const registerLivePlaybackGetter = useCallback(
+    (getter: (() => LivePlaybackSnapshot | null) | null) => {
+      livePlaybackGetterRef.current = getter;
+    },
+    []
+  );
+
+  const emitSystemNotice = useCallback(
+    (params: {
+      roomId: string;
+      text: string;
+      id?: string;
+      sessionToken?: string;
+      persist?: boolean;
+      broadcastRealtime?: boolean;
+      addLocally?: boolean;
+    }) => {
+      const now = Date.now();
+      const msgId =
+        params.id || `sys_${peerId}_${now}_${Math.random().toString(36).slice(2, 6)}`;
+      const noticeMsg: ChatMessage = {
+        id: msgId,
+        peerId: SYSTEM_NOTICE_PEER_ID,
+        name: 'Sistema',
+        text: params.text,
+        createdAtMs: now,
+      };
+
+      if (params.addLocally !== false) {
+        setChatMessages((prev) => appendUniqueChatMessage(prev, noticeMsg));
+      }
+
+      if (params.broadcastRealtime !== false) {
+        if (supabaseChannelRef.current && realtimeSubscribedRef.current) {
+          void supabaseChannelRef.current.send({
+            type: 'broadcast',
+            event: 'chat:message',
+            payload: {
+              message: noticeMsg,
+              seq: seqRef.current + 1,
+            },
+          });
+        } else {
+          pendingChatMessagesRef.current.push({
+            id: msgId,
+            roomId: params.roomId,
+            text: params.text,
+            createdAtMs: now,
+            peerId: SYSTEM_NOTICE_PEER_ID,
+            peerName: 'Sistema',
+          });
+        }
+      }
+
+      if (params.persist !== false) {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (params.sessionToken) {
+          headers['X-Bridge-Token'] = params.sessionToken;
+        }
+        fetch(`/api/bridge/rooms/${encodeURIComponent(params.roomId)}/chat`, {
+          method: 'POST',
+          headers,
+          keepalive: true,
+          body: JSON.stringify({
+            id: msgId,
+            peerId: SYSTEM_NOTICE_PEER_ID,
+            peerName: 'Sistema',
+            text: params.text,
+            createdAtMs: now,
+          }),
+        }).catch(() => {});
+      }
+    },
+    [peerId]
   );
 
   // Probe Supabase Realtime channel when backend memory doesn't hold the room (e.g., Vercel serverless cross-instance)
@@ -763,6 +879,16 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           ingestRoomSnapshot(resolvedRoom, true);
         }
 
+        if (mode === 'join' && !options.pickerMode) {
+          const joinBucket = Math.floor(Date.now() / 10_000);
+          emitSystemNotice({
+            roomId: cleanRoomId,
+            text: `${activeName} entrou na sala`,
+            id: `sys_join_${cleanRoomId}_${peerId}_${joinBucket}`,
+            sessionToken: nextConfig.sessionToken,
+          });
+        }
+
         postCrossWindowBridgeMessage({
           type: 'LOVEFLIX_ROOM_CONNECTED',
           roomId: cleanRoomId,
@@ -778,10 +904,23 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         setConnecting(false);
       }
     },
-    [ingestRoomSnapshot, peerId, probeRealtimeRoom, profile?.avatarSrc, profile?.name]
+    [emitSystemNotice, ingestRoomSnapshot, peerId, probeRealtimeRoom, profile?.avatarSrc, profile?.name]
   );
 
   const disconnectExternalRoom = useCallback(() => {
+    const activeCfg = configRef.current;
+    const leavingName = latestRoomDataRef.current.profileName || 'Love Flix';
+    if (activeCfg?.roomId && !activeCfg.pickerMode) {
+      const leaveBucket = Math.floor(Date.now() / 10_000);
+      emitSystemNotice({
+        roomId: activeCfg.roomId,
+        text: `${leavingName} saiu`,
+        id: `sys_leave_${activeCfg.roomId}_${peerId}_${leaveBucket}`,
+        sessionToken: activeCfg.sessionToken,
+        addLocally: false,
+      });
+    }
+
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -816,6 +955,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
     pendingChatMessagesRef.current = [];
     serverPeersRef.current = [];
     seenEventIdsRef.current.clear();
+    livePlaybackGetterRef.current = null;
     setConfig(null);
     setLastConnectionError(null);
     setSyncedMedia(null);
@@ -826,7 +966,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
     seqRef.current = 0;
     saveConnectionConfig(null);
     saveSnapshotCache(null);
-  }, []);
+  }, [emitSystemNotice, peerId]);
 
   const createRoom = useCallback(
     async (optionsOrId?: string | CreateRoomOptions): Promise<string | null> => {
@@ -869,10 +1009,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
         text: clean,
         createdAtMs: now,
       };
-      setChatMessages((prev) => {
-        if (prev.some((m) => m.id === msgId)) return prev;
-        return [...prev.slice(-60), localMsg];
-      });
+      setChatMessages((prev) => appendUniqueChatMessage(prev, localMsg));
 
       // 1. Real-time Supabase broadcast (instant delivery across Vercel/mobile/tabs)
       if (supabaseChannelRef.current && realtimeSubscribedRef.current) {
@@ -1121,6 +1258,34 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           const { peers: presencePeers } = extractPresencePeers(sbChannel);
           setPeers(mergePeersLists(presencePeers, serverPeersRef.current));
         })
+        .on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
+          if (cancelled) return;
+          const currentState = sbChannel.presenceState<PresencePeerPayload>();
+          const remainingForKey = currentState[key];
+          if (Array.isArray(remainingForKey) && remainingForKey.length > 0) return;
+
+          const leftEntry =
+            Array.isArray(leftPresences) && leftPresences.length > 0
+              ? (leftPresences[leftPresences.length - 1] as unknown as Partial<PresencePeerPayload>)
+              : null;
+          const leftPeerId = leftEntry?.peerId || key;
+          if (!leftPeerId || leftPeerId === peerId || leftPeerId.endsWith('_probe')) return;
+          if (currentState[leftPeerId]?.length) return;
+
+          const leftName = String(leftEntry?.name || '').trim();
+          if (!leftName) return;
+
+          const leaveBucket = Math.floor(Date.now() / 10_000);
+          emitSystemNotice({
+            roomId: config.roomId,
+            text: `${leftName} saiu`,
+            id: `sys_leave_${config.roomId}_${leftPeerId}_${leaveBucket}`,
+            sessionToken: config.sessionToken,
+            persist: Boolean(config.isHost),
+            broadcastRealtime: false,
+            addLocally: true,
+          });
+        })
         .on('broadcast', { event: 'room:request_snapshot' }, ({ payload }) => {
           if (cancelled) return;
           const reqId = (payload as { requesterId?: string })?.requesterId;
@@ -1132,7 +1297,21 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
             if (cancelled || !realtimeSubscribedRef.current) return;
             const d = latestRoomDataRef.current;
             const pb = d.syncedPlayback;
-            const livePb: ExternalRoomPlayback = pb
+            const hostLive = config.isHost ? livePlaybackGetterRef.current?.() : null;
+            const nowMs = Date.now();
+            const livePb: ExternalRoomPlayback = hostLive
+              ? {
+                  paused: Boolean(hostLive.paused),
+                  positionSec: Number(Math.max(0, hostLive.positionSec).toFixed(3)),
+                  playbackRate: hostLive.playbackRate > 0 ? hostLive.playbackRate : 1,
+                  action: 'sync',
+                  seq: (pb?.seq || seqRef.current) + 1,
+                  eventId: `snap-${nowMs}`,
+                  actorId: peerId,
+                  actorName: d.profileName,
+                  updatedAtMs: nowMs,
+                }
+              : pb
               ? {
                   ...pb,
                   positionSec: pb.paused
@@ -1143,12 +1322,12 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
                           pb.positionSec +
                             Math.max(
                               0,
-                              (Date.now() + clockOffsetMsRef.current - pb.updatedAtMs) / 1000
+                              (nowMs + clockOffsetMsRef.current - pb.updatedAtMs) / 1000
                             ) *
                               (pb.playbackRate || 1)
                         ).toFixed(3)
                       ),
-                  updatedAtMs: Date.now(),
+                  updatedAtMs: nowMs,
                 }
               : {
                   paused: false,
@@ -1156,10 +1335,10 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
                   playbackRate: 1,
                   action: 'init',
                   seq: seqRef.current,
-                  eventId: `snap-${Date.now()}`,
+                  eventId: `snap-${nowMs}`,
                   actorId: peerId,
                   actorName: d.profileName,
-                  updatedAtMs: Date.now(),
+                  updatedAtMs: nowMs,
                 };
 
             void sbChannel.send({
@@ -1170,7 +1349,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
                 snapshot: {
                   roomId: config.roomId,
                   seq: seqRef.current,
-                  serverNowMs: Date.now(),
+                  serverNowMs: nowMs,
                   externalAppUrl: config.returnUrl || null,
                   webhookConfigured: Boolean(config.webhookUrl),
                   media: d.syncedMedia,
@@ -1230,10 +1409,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           if (typeof p.seq === 'number') seqRef.current = Math.max(seqRef.current, p.seq);
           if (p.message?.id) {
             const chatMsg = p.message;
-            setChatMessages((prev) => {
-              if (prev.some((m) => m.id === chatMsg.id)) return prev;
-              return [...prev.slice(-60), chatMsg];
-            });
+            setChatMessages((prev) => appendUniqueChatMessage(prev, chatMsg));
           }
         })
         .on('broadcast', { event: 'reaction:event' }, ({ payload }) => {
@@ -1250,6 +1426,33 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           if (status === 'SUBSCRIBED') {
             realtimeSubscribedRef.current = true;
             void sbChannel.track(buildPresencePayload());
+
+            // Flush any queued system join notices now that Realtime broadcast is open
+            const queuedSys = pendingChatMessagesRef.current.filter(
+              (m) => m.roomId === config.roomId && m.peerId === SYSTEM_NOTICE_PEER_ID
+            );
+            if (queuedSys.length > 0) {
+              pendingChatMessagesRef.current = pendingChatMessagesRef.current.filter(
+                (m) => !(m.roomId === config.roomId && m.peerId === SYSTEM_NOTICE_PEER_ID)
+              );
+              for (const qm of queuedSys) {
+                void sbChannel.send({
+                  type: 'broadcast',
+                  event: 'chat:message',
+                  payload: {
+                    message: {
+                      id: qm.id,
+                      peerId: SYSTEM_NOTICE_PEER_ID,
+                      name: 'Sistema',
+                      text: qm.text,
+                      createdAtMs: qm.createdAtMs,
+                    },
+                    seq: seqRef.current + 1,
+                  },
+                });
+              }
+            }
+
             if (!latestRoomDataRef.current.syncedMedia) {
               void sbChannel.send({
                 type: 'broadcast',
@@ -1300,10 +1503,10 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           })
         );
         const queuedMessages = pendingChatMessagesRef.current.filter(
-          (message) => message.roomId === config.roomId
+          (message) => message.roomId === config.roomId && message.peerId !== SYSTEM_NOTICE_PEER_ID
         );
         pendingChatMessagesRef.current = pendingChatMessagesRef.current.filter(
-          (message) => message.roomId !== config.roomId
+          (message) => message.roomId !== config.roomId || message.peerId === SYSTEM_NOTICE_PEER_ID
         );
         queuedMessages.forEach((message) => {
           ws.send(
@@ -1358,6 +1561,22 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
           if ((mType === 'peer:joined' || mType === 'peer:left') && Array.isArray(msg.peers)) {
             serverPeersRef.current = msg.peers as ExternalRoomPeer[];
             setPeers((current) => mergePeersLists(current, serverPeersRef.current));
+            if (mType === 'peer:left') {
+              const leftId = String(msg.peerId || '').trim();
+              const leftName = String(msg.peerName || '').trim();
+              if (leftId && leftId !== peerId && leftName) {
+                const leaveBucket = Math.floor(Date.now() / 10_000);
+                setChatMessages((prev) =>
+                  appendUniqueChatMessage(prev, {
+                    id: `sys_leave_${config.roomId}_${leftId}_${leaveBucket}`,
+                    peerId: SYSTEM_NOTICE_PEER_ID,
+                    name: 'Sistema',
+                    text: `${leftName} saiu`,
+                    createdAtMs: Date.now(),
+                  })
+                );
+              }
+            }
             return;
           }
 
@@ -1366,10 +1585,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
               seqRef.current = Math.max(seqRef.current, msg.seq);
             }
             const chatMsg = msg.message as ChatMessage;
-            setChatMessages((prev) => {
-              if (prev.some((m) => m.id === chatMsg.id)) return prev;
-              return [...prev.slice(-60), chatMsg];
-            });
+            setChatMessages((prev) => appendUniqueChatMessage(prev, chatMsg));
             return;
           }
 
@@ -1722,6 +1938,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const value = useMemo<ExternalRoomContextValue>(
     () => ({
       peerId,
+      isHost: Boolean(config?.isHost),
       isConnected: Boolean(config?.roomId),
       isPickerMode: Boolean(config?.pickerMode),
       connecting,
@@ -1738,6 +1955,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       disconnectExternalRoom,
       syncMediaToExternalRoom,
       syncPlaybackToExternalRoom,
+      registerLivePlaybackGetter,
       sendChatMessage,
       sendReaction,
       getLiveRoomPositionSec,
@@ -1760,6 +1978,7 @@ export const ExternalRoomProvider: React.FC<{ children: React.ReactNode }> = ({ 
       disconnectExternalRoom,
       syncMediaToExternalRoom,
       syncPlaybackToExternalRoom,
+      registerLivePlaybackGetter,
       sendChatMessage,
       sendReaction,
       getLiveRoomPositionSec,

@@ -350,6 +350,7 @@ export function renderDirectVideoHtml(
         }, ms || 450);
       };
 
+      let initialStartPosition = -1;
       try {
         const initParams = new URLSearchParams(window.location.search);
         audioPref = initParams.get('audioPref') === 'original' ? 'original' : 'pt';
@@ -363,6 +364,9 @@ export function renderDirectVideoHtml(
         }
         const startAtRaw = Number(initParams.get('startAt'));
         const pausedParam = initParams.get('paused');
+        if (Number.isFinite(startAtRaw) && startAtRaw > 0) {
+          initialStartPosition = startAtRaw;
+        }
         if ((Number.isFinite(startAtRaw) && startAtRaw > 0) || pausedParam === '1' || pausedParam === 'true') {
           pendingRemoteState = {
             type: 'LOVEFLIX_PLAYER_COMMAND',
@@ -473,7 +477,7 @@ export function renderDirectVideoHtml(
 
       const applyRemoteCommandNow = (cmd) => {
         if (!cmd || typeof cmd !== 'object') return;
-        markRemoteSync(500);
+        markRemoteSync(1200);
         isInitialAutoplay = false;
 
         if (typeof cmd.playbackRate === 'number' && cmd.playbackRate >= 0.25 && cmd.playbackRate <= 4) {
@@ -835,6 +839,7 @@ export function renderDirectVideoHtml(
         const hls = new window.Hls({
           enableWorker: true,
           lowLatencyMode: false,
+          startPosition: initialStartPosition > 0 ? initialStartPosition : -1,
           maxBufferLength: 90,
           maxMaxBufferLength: 180,
           backBufferLength: 30,

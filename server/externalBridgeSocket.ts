@@ -188,6 +188,8 @@ export function attachExternalBridgeWebSocketServer(httpServer: HttpServer): voi
       }
 
       if (type === 'room:leave') {
+        const leavingPeer = room.peers.get(meta.peerId);
+        const leavingName = meta.name || leavingPeer?.name || 'Participante';
         roomSockets.get(meta.roomId)?.delete(ws);
         socketMeta.delete(ws);
         room.peers.delete(meta.peerId);
@@ -196,6 +198,7 @@ export function attachExternalBridgeWebSocketServer(httpServer: HttpServer): voi
           type: 'peer:left',
           roomId: meta.roomId,
           peerId: meta.peerId,
+          peerName: leavingName,
           peers: Array.from(room.peers.values()),
           serverNowMs: Date.now(),
         });
@@ -285,11 +288,14 @@ export function attachExternalBridgeWebSocketServer(httpServer: HttpServer): voi
 
       const room = bridgeRoomsStore.get(meta.roomId);
       if (room) {
+        const leavingPeer = room.peers.get(meta.peerId);
+        const leavingName = meta.name || leavingPeer?.name || 'Participante';
         room.peers.delete(meta.peerId);
         broadcastRoomPayload(meta.roomId, {
           type: 'peer:left',
           roomId: meta.roomId,
           peerId: meta.peerId,
+          peerName: leavingName,
           peers: Array.from(room.peers.values()),
           serverNowMs: Date.now(),
         });

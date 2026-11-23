@@ -9,7 +9,6 @@ import {
   LogOut,
   Play,
   Radio,
-  RefreshCw,
   Search,
   Send,
   SkipForward,
@@ -73,6 +72,7 @@ export const SessaoFlixPage: React.FC = () => {
   const preferredQuality: 'auto' | '1080p' | '720p' | 'saver' = profile.playbackQuality || 'auto';
   const {
     peerId,
+    isHost,
     isConnected,
     connecting,
     lastConnectionError,
@@ -86,6 +86,7 @@ export const SessaoFlixPage: React.FC = () => {
     disconnectExternalRoom,
     syncMediaToExternalRoom,
     syncPlaybackToExternalRoom,
+    registerLivePlaybackGetter,
     getLiveRoomPositionSec,
     subscribeRemotePlayback,
     sendChatMessage,
@@ -152,6 +153,15 @@ export const SessaoFlixPage: React.FC = () => {
   const lastIntroContentKeyRef = useRef<string | null>(null);
   const waitIntroStreamKeyRef = useRef<string | null>(null);
   const waitIntroFlagRef = useRef<boolean>(false);
+  const initialStartAtRef = useRef<number>(0);
+  const initialPausedRef = useRef<boolean>(false);
+  const hostLivePlaybackRef = useRef<{
+    positionSec: number;
+    paused: boolean;
+    playbackRate: number;
+    updatedAtMs: number;
+  } | null>(null);
+  const lastHostHeartbeatSentAtRef = useRef<number>(0);
   const suppressOutgoingSyncUntilRef = useRef<number>(0);
   const remoteNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptedAutoRoomRef = useRef<string | null>(null);
@@ -824,27 +834,34 @@ export const SessaoFlixPage: React.FC = () => {
     }
   }, [isConnected, syncedMedia, activeRoomChannels, currentChannel, handleSwitchRoomChannel]);
 
-  // Manual resync with room live timestamp
-  const handleManualResync = useCallback(() => {
-    if (!syncedPlayback || !iframeRef.current?.contentWindow) return;
-    const liveSec = getLiveRoomPositionSec(syncedPlayback);
-    suppressOutgoingSyncUntilRef.current = Date.now() + 900;
-    iframeRef.current.contentWindow.postMessage(
-      {
-        type: 'LOVEFLIX_PLAYER_COMMAND',
-        command: 'sync',
-        positionSec: liveSec,
-        paused: syncedPlayback.paused,
-        playbackRate: syncedPlayback.playbackRate || 1,
-      },
-      '*'
-    );
-    const mins = Math.floor(liveSec / 60);
-    const secs = String(Math.floor(liveSec % 60)).padStart(2, '0');
-    pushToast(`Sincronizado com a sala em ${mins}:${secs}`, 'accent');
-  }, [getLiveRoomPositionSec, pushToast, syncedPlayback]);
+  // Reset host live playback cache whenever the room or active media changes
+  useEffect(() => {
+    hostLivePlaybackRef.current = null;
+    lastHostHeartbeatSentAtRef.current = 0;
+  }, [roomId, syncedMedia?.tmdbId, syncedMedia?.season, syncedMedia?.episode]);
 
-  // Listen for player iframe events (intro release, fallback, READY sync, playback events)
+  // Register live authoritative playback getter for the host so joining peers receive exact host time
+  useEffect(() => {
+    if (!isConnected || !isHost) {
+      registerLivePlaybackGetter(null);
+      return;
+    }
+
+    registerLivePlaybackGetter(() => {
+      const live = hostLivePlaybackRef.current;
+      if (!live) return null;
+      const elapsedSec = live.paused ? 0 : Math.max(0, (Date.now() - live.updatedAtMs) / 1000);
+      return {
+        positionSec: Math.max(0, live.positionSec + elapsedSec * (live.playbackRate || 1)),
+        paused: live.paused,
+        playbackRate: live.playbackRate || 1,
+      };
+    });
+
+    return () => registerLivePlaybackGetter(null);
+  }, [isConnected, isHost, registerLivePlaybackGetter]);
+
+  // Listen for player iframe events (intro release, fallback, READY sync, host-authoritative time & events)
   useEffect(() => {
     if (!isConnected || !syncedMedia) return;
 
@@ -874,21 +891,64 @@ export const SessaoFlixPage: React.FC = () => {
       }
 
       if (d.type === 'LOVEFLIX_PLAYER_READY' && iframeRef.current?.contentWindow) {
-        if (!effectiveIsPlayingIntro) {
+        if (!isHost && !effectiveIsPlayingIntro) {
           pushRoomPlaybackToIframe();
         }
         return;
       }
 
+      if (d.type === 'LOVEFLIX_PLAYER_TIME') {
+        const pos = Number(d.positionSec);
+        if (!Number.isFinite(pos) || pos < 0) return;
+        const paused = Boolean(d.paused);
+        const rate = Number(d.playbackRate) || 1;
+
+        if (isHost && !effectiveIsPlayingIntro) {
+          hostLivePlaybackRef.current = {
+            positionSec: pos,
+            paused,
+            playbackRate: rate,
+            updatedAtMs: Date.now(),
+          };
+          const expectedSec = syncedPlayback ? getLiveRoomPositionSec(syncedPlayback) : 0;
+          const drift = Math.abs(pos - expectedSec);
+          const pausedMismatch = syncedPlayback ? syncedPlayback.paused !== paused : false;
+          if (
+            (drift > 2.2 || pausedMismatch) &&
+            Date.now() - lastHostHeartbeatSentAtRef.current > 4500
+          ) {
+            lastHostHeartbeatSentAtRef.current = Date.now();
+            syncPlaybackToExternalRoom({
+              action: 'sync',
+              positionSec: pos,
+              paused,
+              playbackRate: rate,
+            });
+          }
+        }
+        return;
+      }
+
       if (d.type === 'LOVEFLIX_PLAYER_EVENT') {
+        // Only the host drives room playback so joining/buffering guests never pause or interrupt the session
+        if (!isHost) return;
         if (Date.now() < suppressOutgoingSyncUntilRef.current) return;
         const action = String(d.action || '') as ExternalPlaybackAction;
         if (action === 'play' || action === 'pause' || action === 'seek' || action === 'ratechange') {
+          const pos = Number(d.positionSec) || 0;
+          const paused = Boolean(d.paused);
+          const rate = Number(d.playbackRate) || 1;
+          hostLivePlaybackRef.current = {
+            positionSec: pos,
+            paused,
+            playbackRate: rate,
+            updatedAtMs: Date.now(),
+          };
           syncPlaybackToExternalRoom({
             action,
-            positionSec: Number(d.positionSec) || 0,
-            paused: Boolean(d.paused),
-            playbackRate: Number(d.playbackRate) || 1,
+            positionSec: pos,
+            paused,
+            playbackRate: rate,
           });
         }
       }
@@ -900,23 +960,34 @@ export const SessaoFlixPage: React.FC = () => {
     activeRoomChannels,
     currentChannel,
     effectiveIsPlayingIntro,
+    getLiveRoomPositionSec,
     handleSwitchRoomChannel,
     isConnected,
+    isHost,
     notifyIframeIntroEnded,
     pushRoomPlaybackToIframe,
     syncPlaybackToExternalRoom,
     syncedMedia,
+    syncedPlayback,
   ]);
 
-  // Subscribe to remote playback commands (play, pause, seek) from other participants
+  // Subscribe to remote playback commands (play, pause, seek, sync) from the host
   useEffect(() => {
     if (!isConnected) return;
 
     return subscribeRemotePlayback((playback, liveSec) => {
-      if (iframeRef.current?.contentWindow) {
-        suppressOutgoingSyncUntilRef.current = Date.now() + 900;
+      if (isHost) return;
+
+      if (iframeRef.current?.contentWindow && !effectiveIsPlayingIntro) {
+        suppressOutgoingSyncUntilRef.current = Date.now() + 1200;
         const command =
-          playback.action === 'seek' ? 'seek' : playback.paused ? 'pause' : 'play';
+          playback.action === 'seek'
+            ? 'seek'
+            : playback.action === 'sync'
+            ? 'sync'
+            : playback.paused
+            ? 'pause'
+            : 'play';
         iframeRef.current.contentWindow.postMessage(
           {
             type: 'LOVEFLIX_PLAYER_COMMAND',
@@ -950,7 +1021,7 @@ export const SessaoFlixPage: React.FC = () => {
         }, 2600);
       }
     });
-  }, [isConnected, subscribeRemotePlayback]);
+  }, [effectiveIsPlayingIntro, isConnected, isHost, subscribeRemotePlayback]);
 
   // Compute stream URL & identity key identically to StreamingPlayerModal
   const streamIdentityKey = syncedMedia
@@ -960,9 +1031,14 @@ export const SessaoFlixPage: React.FC = () => {
   if (!syncedMedia) {
     waitIntroStreamKeyRef.current = null;
     waitIntroFlagRef.current = false;
+    initialStartAtRef.current = 0;
+    initialPausedRef.current = false;
   } else if (waitIntroStreamKeyRef.current !== streamIdentityKey) {
     waitIntroStreamKeyRef.current = streamIdentityKey;
     waitIntroFlagRef.current = currentChannel === 1 && effectiveIsPlayingIntro;
+    const liveAtMount = !isHost && syncedPlayback ? getLiveRoomPositionSec(syncedPlayback) : 0;
+    initialStartAtRef.current = liveAtMount > 1.5 ? Math.floor(liveAtMount) : 0;
+    initialPausedRef.current = Boolean(!isHost && syncedPlayback?.paused);
   }
 
   const streamSrc = useMemo(() => {
@@ -983,6 +1059,12 @@ export const SessaoFlixPage: React.FC = () => {
     }
     if (currentChannel === 1 && waitIntroFlagRef.current) {
       streamParams.set('waitIntro', '1');
+    }
+    if (currentChannel === 1 && initialStartAtRef.current > 0) {
+      streamParams.set('startAt', String(initialStartAtRef.current));
+    }
+    if (currentChannel === 1 && initialPausedRef.current) {
+      streamParams.set('paused', '1');
     }
     return `/api/supercdn/stream?${streamParams.toString()}`;
   }, [
@@ -1007,110 +1089,44 @@ export const SessaoFlixPage: React.FC = () => {
     const shouldMountIframe =
       Boolean(streamSrc && streamSrc.trim()) &&
       (!effectiveIsPlayingIntro || canPreloadBehindIntro);
-    const headerChannels =
-      activeRoomChannels === null
-        ? CHANNELS.filter((ch) => ch.id === currentChannel)
-        : CHANNELS.filter((ch) => activeRoomChannels.includes(ch.id));
     const noRoomChannelsAvailable =
       activeRoomChannels !== null && activeRoomChannels.length === 0;
 
     return (
       <div className="fixed inset-0 z-[100] flex h-[100dvh] w-full flex-col overflow-hidden bg-[#050505] text-white">
         <main className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
-          <section className="relative flex min-h-0 flex-1 flex-col bg-black">
-            {/* Slim Room Header Bar (mirrors StreamingPlayerModal header so intro & player controls never collide) */}
-            <header className="z-20 flex h-12 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] bg-[#080808] px-3 sm:px-5">
-              <div className="flex min-w-0 items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsParticipantsOpen(false);
-                    disconnectExternalRoom();
-                  }}
-                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-[#141414] px-2.5 text-xs font-bold text-white transition-colors hover:bg-[#E50914] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
-                  title="Sair da sala"
-                >
-                  <LogOut className="h-3.5 w-3.5" />
-                  <span>Sair</span>
-                </button>
+          <section className="relative flex shrink-0 flex-col bg-black lg:min-h-0 lg:flex-1">
+            {/* Minimal Top Bar: Exit + Participants Count only */}
+            <header className="z-20 flex h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] bg-[#080808] px-3 sm:px-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsParticipantsOpen(false);
+                  disconnectExternalRoom();
+                }}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-[#141414] px-2.5 text-xs font-bold text-white transition-colors hover:bg-[#E50914] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
+                title="Sair da sala"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span>Sair</span>
+              </button>
 
-                <button
-                  type="button"
-                  onClick={handleCopyRoomId}
-                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-[#141414] px-2.5 text-xs font-mono font-bold text-white transition-colors hover:border-[#E50914]/60"
-                  title="Copiar código da sala"
-                >
-                  <span className="text-[#FF7A83]">#{roomId}</span>
-                  {copiedLink ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5 text-white/70" />
-                  )}
-                </button>
-
-                {syncedMedia && (
-                  <p className="hidden truncate text-xs font-bold text-white/90 sm:block sm:max-w-[240px]">
-                    {syncedMedia.title}
-                    {syncedMedia.mediaType === 'tv' && syncedMedia.season && syncedMedia.episode
-                      ? ` · T${syncedMedia.season}:E${syncedMedia.episode}`
-                      : ''}
-                  </p>
-                )}
-              </div>
-
-              <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-                {syncedMedia && !noRoomChannelsAvailable && headerChannels.length > 0 && (
-                  <div className="flex items-center gap-1 rounded-xl border border-white/[0.08] bg-[#121212] p-1">
-                    {headerChannels.map((ch) => {
-                      const isSelected = currentChannel === ch.id;
-                      return (
-                        <button
-                          key={ch.id}
-                          type="button"
-                          onClick={() => void handleSwitchRoomChannel(ch.id)}
-                          title={ch.label}
-                          className={`whitespace-nowrap rounded-lg px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-bold transition-colors cursor-pointer ${
-                            isSelected
-                              ? 'bg-[#E50914] text-white shadow'
-                              : 'text-[#A1A1A1] hover:bg-white/[0.06] hover:text-white'
-                          }`}
-                        >
-                          {ch.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {syncedMedia && currentChannel === 1 && (
-                  <button
-                    type="button"
-                    onClick={handleManualResync}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-[#141414] px-2.5 text-xs font-bold text-white/90 transition-colors hover:bg-white/15"
-                    title="Sincronizar tempo com a sala"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5 text-[#E50914]" />
-                    <span className="hidden md:inline">Sincronizar</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setIsParticipantsOpen(true)}
-                  aria-label="Abrir participantes"
-                  aria-expanded={isParticipantsOpen}
-                  className="relative flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-[#141414] px-2.5 text-xs font-bold text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
-                  title="Participantes"
-                >
-                  <UserRound className="h-3.5 w-3.5 text-[#FF6470]" />
-                  <span>{Math.max(1, peers.length)}</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setIsParticipantsOpen(true)}
+                aria-label="Abrir participantes"
+                aria-expanded={isParticipantsOpen}
+                className="relative flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-[#141414] px-3 text-xs font-bold text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E50914]"
+                title="Pessoas na sala"
+              >
+                <UserRound className="h-3.5 w-3.5 text-[#FF6470]" />
+                <span>{Math.max(1, peers.length)}</span>
+              </button>
             </header>
 
             <div
               id="SuperCDNContainerVideo"
-              className="relative w-full flex-1 min-h-0 overflow-hidden bg-black"
+              className="relative w-full aspect-video max-h-[42dvh] shrink-0 overflow-hidden bg-black lg:aspect-auto lg:max-h-none lg:flex-1 lg:min-h-0"
             >
               {/* Official Love Flix Opening Video with Sound (identical to StreamingPlayerModal) */}
               {syncedMedia && effectiveIsPlayingIntro && (
@@ -1132,19 +1148,19 @@ export const SessaoFlixPage: React.FC = () => {
                     className="h-full w-full object-contain pointer-events-none"
                   />
 
-                  <div className="pointer-events-none absolute left-4 top-4 z-50 flex items-center gap-2 rounded-lg border border-white/10 bg-black/60 px-3 py-1.5 backdrop-blur-md">
+                  <div className="pointer-events-none absolute left-3 top-3 z-50 flex items-center gap-2 rounded-lg border border-white/10 bg-black/60 px-2.5 py-1 backdrop-blur-md">
                     <span className="h-2 w-2 rounded-full bg-[#E50914] animate-ping" />
-                    <span className="text-[11px] font-extrabold tracking-wider text-white uppercase">
+                    <span className="text-[10px] sm:text-[11px] font-extrabold tracking-wider text-white uppercase">
                       Abertura Oficial Love Flix
                     </span>
                   </div>
 
-                  <div className="absolute bottom-6 right-6 z-50 flex items-center gap-2.5">
+                  <div className="absolute bottom-3 right-3 sm:bottom-6 sm:right-6 z-50 flex items-center gap-2">
                     {isIntroMuted ? (
                       <button
                         type="button"
                         onClick={toggleIntroSound}
-                        className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-white/20 bg-[#E50914] px-3.5 py-2 text-xs font-bold text-white shadow-2xl transition-all hover:bg-[#FF253A] active:scale-95 animate-pulse"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/20 bg-[#E50914] px-3 py-1.5 sm:px-3.5 sm:py-2 text-xs font-bold text-white shadow-2xl transition-all hover:bg-[#FF253A] active:scale-95 animate-pulse"
                         title="Ativar som da abertura"
                       >
                         <VolumeX className="h-4 w-4" />
@@ -1154,7 +1170,7 @@ export const SessaoFlixPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={toggleIntroSound}
-                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/15 bg-black/75 px-3 py-2 text-xs font-bold text-white/90 backdrop-blur-md transition-all hover:bg-[#1f1f1f]"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/15 bg-black/75 px-2.5 py-1.5 sm:px-3 sm:py-2 text-xs font-bold text-white/90 backdrop-blur-md transition-all hover:bg-[#1f1f1f]"
                         title="Silenciar áudio da abertura"
                       >
                         <Volume2 className="h-4 w-4 text-[#FF253A]" />
@@ -1164,7 +1180,7 @@ export const SessaoFlixPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={handleEndIntro}
-                      className="group inline-flex cursor-pointer items-center gap-2 rounded-xl border border-white/20 bg-black/75 px-4 py-2 text-xs font-bold text-white shadow-2xl backdrop-blur-md transition-all hover:border-transparent hover:bg-[#E50914] active:scale-95"
+                      className="group inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/20 bg-black/75 px-3 py-1.5 sm:px-4 sm:py-2 text-xs font-bold text-white shadow-2xl backdrop-blur-md transition-all hover:border-transparent hover:bg-[#E50914] active:scale-95"
                       title="Pular abertura oficial"
                     >
                       <SkipForward className="h-4 w-4 fill-current transition-transform group-hover:translate-x-0.5" />
@@ -1178,27 +1194,27 @@ export const SessaoFlixPage: React.FC = () => {
               )}
 
               {remoteSyncNotice && !effectiveIsPlayingIntro && (
-                <div className="pointer-events-none absolute bottom-4 left-1/2 z-30 -translate-x-1/2 rounded-full border border-white/15 bg-black/80 px-3.5 py-1.5 text-xs font-bold text-white shadow-lg backdrop-blur-md">
+                <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-full border border-white/15 bg-black/80 px-3.5 py-1.5 text-xs font-bold text-white shadow-lg backdrop-blur-md">
                   {remoteSyncNotice}
                 </div>
               )}
 
               {activeIsCinemaExclusive ? (
-                <div className="flex h-full w-full items-center justify-center bg-[#080808] p-6 text-center">
-                  <div className="max-w-md rounded-2xl border border-amber-500/30 bg-[#121212] p-6 shadow-2xl">
-                    <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl border border-amber-500/30 bg-amber-500/20 text-amber-400">
+                <div className="flex h-full w-full items-center justify-center bg-[#080808] p-4 text-center">
+                  <div className="max-w-md rounded-2xl border border-amber-500/30 bg-[#121212] p-5 shadow-2xl">
+                    <div className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-2xl border border-amber-500/30 bg-amber-500/20 text-amber-400">
                       <Clapperboard className="h-5 w-5" />
                     </div>
-                    <p className="mb-1.5 text-sm font-bold text-white">Exclusivo nos Cinemas</p>
+                    <p className="mb-1 text-sm font-bold text-white">Exclusivo nos Cinemas</p>
                     <p className="text-xs leading-relaxed text-[#A1A1A1]">
                       Este filme ainda está em exibição exclusiva nos cinemas e não foi liberado em plataformas digitais.
                     </p>
                   </div>
                 </div>
               ) : noRoomChannelsAvailable ? (
-                <div className="flex h-full w-full items-center justify-center bg-[#080808] p-6 text-center">
-                  <div className="max-w-md rounded-2xl border border-white/10 bg-[#121212] p-6">
-                    <p className="mb-1.5 text-sm font-bold text-white">
+                <div className="flex h-full w-full items-center justify-center bg-[#080808] p-4 text-center">
+                  <div className="max-w-md rounded-2xl border border-white/10 bg-[#121212] p-5">
+                    <p className="mb-1 text-sm font-bold text-white">
                       Transmissão indisponível no momento
                     </p>
                     <p className="text-xs leading-relaxed text-[#A1A1A1]">
@@ -1237,13 +1253,13 @@ export const SessaoFlixPage: React.FC = () => {
                   )}
                 </>
               ) : (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-white/60">
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center text-white/60">
                   {isSubmitting ? (
-                    <Loader2 className="h-8 w-8 animate-spin text-[#E50914]" />
+                    <Loader2 className="h-7 w-7 animate-spin text-[#E50914]" />
                   ) : (
-                    <Clapperboard className="h-10 w-10 text-white/30" />
+                    <Clapperboard className="h-9 w-9 text-white/30" />
                   )}
-                  <p className="text-sm font-semibold">
+                  <p className="text-xs sm:text-sm font-semibold">
                     {isSubmitting ? 'Preparando sua sessão...' : 'Aguardando o conteúdo da sessão...'}
                   </p>
                 </div>
@@ -1251,17 +1267,14 @@ export const SessaoFlixPage: React.FC = () => {
             </div>
           </section>
 
-          <section className="flex min-h-[210px] max-h-[50%] basis-[42%] shrink-0 flex-col overflow-hidden border-t border-white/10 bg-[#0E0E0E] lg:h-auto lg:max-h-none lg:min-h-0 lg:basis-auto lg:shrink lg:border-l lg:border-t-0 lg:w-[360px] xl:w-[400px]">
-            <header className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.08] bg-[#111111] px-4">
+          <section className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-white/10 bg-[#0E0E0E] lg:h-full lg:flex-none lg:border-l lg:border-t-0 lg:w-[370px] xl:w-[410px]">
+            <header className="flex h-11 shrink-0 items-center justify-between border-b border-white/[0.08] bg-[#111111] px-4">
               <span className="text-sm font-bold text-white/90">Chat da Sala</span>
-              <span className="text-[11px] font-semibold text-white/50">
-                {Math.max(1, peers.length)} {Math.max(1, peers.length) === 1 ? 'online' : 'online'}
-              </span>
             </header>
 
             <div
               ref={chatScrollRef}
-              className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3.5 no-scrollbar"
+              className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-3.5 no-scrollbar"
             >
               {chatMessages.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center p-6 text-center text-[#A1A1A1]/70">
@@ -1269,27 +1282,37 @@ export const SessaoFlixPage: React.FC = () => {
                 </div>
               ) : (
                 chatMessages.map((msg) => {
+                  if (msg.peerId === 'system:notice') {
+                    return (
+                      <div key={msg.id} className="flex justify-center py-0.5">
+                        <span className="rounded-lg bg-white/[0.05] px-3 py-1 text-center text-[11px] font-medium text-white/70">
+                          {msg.text}
+                        </span>
+                      </div>
+                    );
+                  }
+
                   if (isSessionWelcomeMessage(msg.text)) {
                     const [headline, intro, invitation, idLabel, idValue, closing] =
                       msg.text.split('\n');
                     return (
                       <article
                         key={msg.id}
-                        className="mx-auto w-full max-w-sm space-y-3 rounded-2xl border border-[#E50914]/25 bg-gradient-to-br from-[#251012] to-[#151112] p-4 shadow-lg shadow-black/20"
+                        className="mx-auto w-full max-w-sm space-y-2.5 rounded-2xl border border-[#E50914]/25 bg-gradient-to-br from-[#251012] to-[#151112] p-3.5 shadow-lg shadow-black/20"
                       >
-                        <div className="space-y-1.5">
+                        <div className="space-y-1">
                           <h2 className="text-sm font-extrabold leading-snug text-white">{headline}</h2>
                           <p className="text-xs leading-relaxed text-white/75">{intro}</p>
                           <p className="text-xs leading-relaxed text-white/75">{invitation}</p>
                         </div>
-                        <div className="rounded-xl border border-[#E50914]/25 bg-black/30 px-3 py-2.5">
-                          <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#FF7A83]">
+                        <div className="rounded-xl border border-[#E50914]/25 bg-black/30 px-3 py-2">
+                          <p className="mb-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-[#FF7A83]">
                             {idLabel}
                           </p>
                           <button
                             type="button"
                             onClick={handleCopyRoomId}
-                            className="flex w-full items-center justify-between gap-2 text-left font-mono text-lg font-black tracking-wide text-white hover:text-[#FF7A83]"
+                            className="flex w-full items-center justify-between gap-2 text-left font-mono text-base sm:text-lg font-black tracking-wide text-white hover:text-[#FF7A83]"
                             title="Copiar ID da sala"
                           >
                             <span className="select-all">{idValue}</span>
