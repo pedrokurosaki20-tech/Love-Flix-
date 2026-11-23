@@ -11,6 +11,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -38,6 +40,11 @@ import androidx.webkit.WebViewFeature
 import com.loveflix.app.databinding.ActivityMainBinding
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
+import java.util.zip.GZIPInputStream
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
@@ -54,13 +61,23 @@ class MainActivity : AppCompatActivity() {
     private val splashSafetyHandler = Handler(Looper.getMainLooper())
 
     // Dedicated Native Canal 2 Player State
+    @Volatile
     private var canal2Active = false
+    @Volatile
     private var canal2IntroPlaying = false
     private var canal2NativeFullscreen = false
+    @Volatile
     private var canal2AudioPref = "pt"
+    private var canal2TargetUrl: String? = null
     private var canal2LastBoundsJson = "{}"
     private var canal2DocStartScript: ScriptHandler? = null
+    @Volatile
     private var canal2WrapperHtml: String? = null
+
+    private val pendingPostLock = Any()
+    private var pendingPostUrl: String? = null
+    private var pendingPostBody: String? = null
+    private var pendingPostAtMs: Long = 0L
 
     private val fileChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -411,6 +428,33 @@ class MainActivity : AppCompatActivity() {
                 if (AdBlocker.isBlockedUrl(url, request.isForMainFrame)) {
                     return AdBlocker.emptyResponse()
                 }
+                val host = request.url?.host
+                val method = request.method?.uppercase(Locale.ROOT) ?: "GET"
+                if (canal2Active &&
+                    Canal2Automation.isSuperFlixHost(host) &&
+                    Canal2Automation.isLikelyHtmlDocumentRequest(url, method, request.requestHeaders)
+                ) {
+                    if (method == "GET") {
+                        val injected = fetchAndInjectSuperFlixHtml(
+                            url,
+                            "GET",
+                            request.requestHeaders,
+                            null
+                        )
+                        if (injected != null) return injected
+                    } else if (method == "POST") {
+                        val pendingBody = consumePendingPost(url)
+                        if (pendingBody != null) {
+                            val injected = fetchAndInjectSuperFlixHtml(
+                                url,
+                                "POST",
+                                request.requestHeaders,
+                                pendingBody
+                            )
+                            if (injected != null) return injected
+                        }
+                    }
+                }
                 return super.shouldInterceptRequest(view, request)
             }
 
@@ -487,7 +531,226 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshCanal2DocumentStartScript() {
+    private fun savePendingPost(rawUrl: String, body: String) {
+        val cleanUrl = rawUrl.substringBefore("#")
+        synchronized(pendingPostLock) {
+            pendingPostUrl = cleanUrl
+            pendingPostBody = body
+            pendingPostAtMs = System.currentTimeMillis()
+        }
+    }
+
+    private fun consumePendingPost(rawUrl: String): String? {
+        val cleanUrl = rawUrl.substringBefore("#")
+        synchronized(pendingPostLock) {
+            val savedUrl = pendingPostUrl ?: return null
+            val savedBody = pendingPostBody ?: return null
+            val ageMs = System.currentTimeMillis() - pendingPostAtMs
+            if (ageMs <= 12_000L && savedUrl.equals(cleanUrl, ignoreCase = true)) {
+                pendingPostUrl = null
+                pendingPostBody = null
+                pendingPostAtMs = 0L
+                return savedBody
+            }
+            if (ageMs > 12_000L) {
+                pendingPostUrl = null
+                pendingPostBody = null
+                pendingPostAtMs = 0L
+            }
+            return null
+        }
+    }
+
+    private fun fetchAndInjectSuperFlixHtml(
+        initialUrl: String,
+        initialMethod: String,
+        requestHeaders: Map<String, String>?,
+        postBody: String?
+    ): WebResourceResponse? {
+        var currentUrl = initialUrl
+        var currentMethod = initialMethod.uppercase(Locale.ROOT)
+        var currentBody = postBody
+        var redirects = 0
+        val cookieManager = CookieManager.getInstance()
+
+        while (redirects <= 6) {
+            var conn: HttpURLConnection? = null
+            try {
+                val urlObj = URL(currentUrl)
+                conn = (urlObj.openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = 10_000
+                    readTimeout = 12_000
+                    requestMethod = currentMethod
+                    useCaches = false
+                }
+
+                val allowedForwardHeaders = setOf(
+                    "user-agent",
+                    "accept",
+                    "accept-language",
+                    "referer",
+                    "origin",
+                    "sec-fetch-dest",
+                    "sec-fetch-mode",
+                    "sec-fetch-site",
+                    "sec-ch-ua",
+                    "sec-ch-ua-mobile",
+                    "sec-ch-ua-platform",
+                    "upgrade-insecure-requests"
+                )
+                var hasUserAgent = false
+                var hasOrigin = false
+                var hasReferer = false
+                var hasSecDest = false
+                var hasSecMode = false
+                var hasSecSite = false
+                if (requestHeaders != null) {
+                    for ((k, v) in requestHeaders) {
+                        val lowerK = k.lowercase(Locale.ROOT)
+                        if (lowerK in allowedForwardHeaders && v.isNotBlank()) {
+                            conn.setRequestProperty(k, v)
+                            when (lowerK) {
+                                "user-agent" -> hasUserAgent = true
+                                "origin" -> hasOrigin = true
+                                "referer" -> hasReferer = true
+                                "sec-fetch-dest" -> hasSecDest = true
+                                "sec-fetch-mode" -> hasSecMode = true
+                                "sec-fetch-site" -> hasSecSite = true
+                            }
+                        }
+                    }
+                }
+                if (!hasUserAgent) {
+                    val ua = try {
+                        WebSettings.getDefaultUserAgent(this)
+                            .replace("; wv)", ")")
+                            .replace("Version/4.0 ", "")
+                    } catch (_: Exception) {
+                        "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                    }
+                    conn.setRequestProperty("User-Agent", ua)
+                }
+                conn.setRequestProperty("Accept-Encoding", "identity")
+
+                val existingCookies = cookieManager.getCookie(currentUrl)
+                if (!existingCookies.isNullOrBlank()) {
+                    conn.setRequestProperty("Cookie", existingCookies)
+                }
+
+                if (currentMethod == "POST" && currentBody != null) {
+                    val scheme = urlObj.protocol ?: "https"
+                    val host = urlObj.host ?: ""
+                    if (!hasOrigin && host.isNotEmpty()) {
+                        conn.setRequestProperty("Origin", "$scheme://$host")
+                    }
+                    if (!hasReferer) {
+                        conn.setRequestProperty("Referer", currentUrl)
+                    }
+                    if (!hasSecDest) conn.setRequestProperty("Sec-Fetch-Dest", "iframe")
+                    if (!hasSecMode) conn.setRequestProperty("Sec-Fetch-Mode", "navigate")
+                    if (!hasSecSite) conn.setRequestProperty("Sec-Fetch-Site", "same-origin")
+                    conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                    conn.doOutput = true
+                    val bodyBytes = currentBody.toByteArray(Charsets.UTF_8)
+                    conn.setFixedLengthStreamingMode(bodyBytes.size)
+                    conn.outputStream.use { os ->
+                        os.write(bodyBytes)
+                        os.flush()
+                    }
+                }
+
+                val status = conn.responseCode
+
+                // Save Set-Cookie headers across every hop
+                val headerFields = conn.headerFields
+                if (headerFields != null) {
+                    for ((k, values) in headerFields) {
+                        if (k != null && k.equals("Set-Cookie", ignoreCase = true) && values != null) {
+                            for (cookieVal in values) {
+                                if (!cookieVal.isNullOrBlank()) {
+                                    cookieManager.setCookie(currentUrl, cookieVal)
+                                }
+                            }
+                        }
+                    }
+                    cookieManager.flush()
+                }
+
+                if (status in listOf(301, 302, 303, 307, 308)) {
+                    val location = conn.getHeaderField("Location") ?: return null
+                    val nextUrl = URL(urlObj, location).toString()
+                    if (!Canal2Automation.isSuperFlixHost(Uri.parse(nextUrl).host)) {
+                        return null
+                    }
+                    currentUrl = nextUrl
+                    if (status == 301 || status == 302 || status == 303) {
+                        currentMethod = "GET"
+                        currentBody = null
+                    }
+                    redirects++
+                    continue
+                }
+
+                if (status !in 200..299) {
+                    return null
+                }
+
+                val contentType = conn.contentType?.lowercase(Locale.ROOT) ?: ""
+                if (!contentType.contains("text/html")) {
+                    return null
+                }
+
+                val rawStream = conn.inputStream ?: return null
+                val decodedStream = if ("gzip".equals(conn.contentEncoding, ignoreCase = true)) {
+                    GZIPInputStream(rawStream)
+                } else {
+                    rawStream
+                }
+
+                val buffer = ByteArrayOutputStream()
+                decodedStream.use { input ->
+                    val chunk = ByteArray(8192)
+                    while (true) {
+                        val read = input.read(chunk)
+                        if (read <= 0) break
+                        buffer.write(chunk, 0, read)
+                    }
+                }
+
+                val html = buffer.toString(Charsets.UTF_8.name())
+                if (html.isBlank()) return null
+
+                val scriptBody = Canal2Automation.buildDocumentStartScript(
+                    canal2AudioPref,
+                    canal2IntroPlaying
+                )
+                val patchedHtml = Canal2Automation.injectScriptIntoHtml(html, scriptBody)
+                val outBytes = patchedHtml.toByteArray(Charsets.UTF_8)
+
+                val safeRespHeaders = mutableMapOf<String, String>()
+                safeRespHeaders["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                return WebResourceResponse(
+                    "text/html",
+                    "utf-8",
+                    200,
+                    "OK",
+                    safeRespHeaders,
+                    ByteArrayInputStream(outBytes)
+                )
+            } catch (_: Exception) {
+                return null
+            } finally {
+                try {
+                    conn?.disconnect()
+                } catch (_: Exception) {
+                }
+            }
+        }
+        return null
+    }
+
+    private fun refreshCanal2DocumentStartScript(targetUrl: String?) {
         canal2DocStartScript?.remove()
         canal2DocStartScript = null
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -495,18 +758,38 @@ class MainActivity : AppCompatActivity() {
                 canal2AudioPref,
                 canal2IntroPlaying
             )
+            val explicitOrigins = mutableSetOf("https://love-flix.vercel.app")
+            if (!targetUrl.isNullOrBlank()) {
+                try {
+                    val uri = Uri.parse(targetUrl)
+                    val scheme = uri.scheme?.lowercase(Locale.ROOT)
+                    val host = uri.host?.lowercase(Locale.ROOT)
+                    if (!scheme.isNullOrBlank() && !host.isNullOrBlank()) {
+                        explicitOrigins.add("$scheme://$host")
+                        explicitOrigins.add("$scheme://*.$host")
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            val withWildcard = explicitOrigins.toMutableSet().apply { add("*") }
             canal2DocStartScript = try {
                 WebViewCompat.addDocumentStartJavaScript(
                     binding.canal2WebView,
                     script,
-                    setOf("*", "https://*", "http://*")
+                    withWildcard
                 )
             } catch (_: IllegalArgumentException) {
-                WebViewCompat.addDocumentStartJavaScript(
-                    binding.canal2WebView,
-                    script,
-                    setOf("*")
-                )
+                try {
+                    WebViewCompat.addDocumentStartJavaScript(
+                        binding.canal2WebView,
+                        script,
+                        explicitOrigins
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+            } catch (_: Exception) {
+                null
             }
         }
     }
@@ -583,6 +866,12 @@ class MainActivity : AppCompatActivity() {
     private fun closeCanal2Native() {
         canal2Active = false
         canal2IntroPlaying = false
+        canal2TargetUrl = null
+        synchronized(pendingPostLock) {
+            pendingPostUrl = null
+            pendingPostBody = null
+            pendingPostAtMs = 0L
+        }
         if (canal2NativeFullscreen) {
             canal2NativeFullscreen = false
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -626,9 +915,10 @@ class MainActivity : AppCompatActivity() {
             if (!Canal2Automation.isAllowedCanal2Url(url)) return
             runOnUiThread {
                 canal2Active = true
+                canal2TargetUrl = url
                 canal2AudioPref = if (audioPref == "original") "original" else "pt"
                 canal2IntroPlaying = introPlaying
-                refreshCanal2DocumentStartScript()
+                refreshCanal2DocumentStartScript(url)
                 applyCanal2Bounds(boundsJson)
                 canal2WrapperHtml = Canal2Automation.buildEmbedWrapperHtml(
                     url,
@@ -689,6 +979,67 @@ class MainActivity : AppCompatActivity() {
     }
 
     private inner class Canal2JsBridge {
+        @JavascriptInterface
+        fun getAudioPref(): String = canal2AudioPref
+
+        @JavascriptInterface
+        fun isIntroPlaying(): Boolean = canal2IntroPlaying
+
+        @JavascriptInterface
+        fun queuePendingPost(url: String, body: String) {
+            if (url.isNotBlank() && body.isNotBlank()) {
+                savePendingPost(url, body)
+            }
+        }
+
+        @JavascriptInterface
+        fun nativeTapAt(normX: Double, normY: Double): Boolean {
+            val xRatio = normX.coerceIn(0.01, 0.99).toFloat()
+            val yRatio = normY.coerceIn(0.01, 0.99).toFloat()
+            runOnUiThread {
+                val webView = binding.canal2WebView
+                val w = webView.width
+                val h = webView.height
+                if (!canal2Active || w <= 0 || h <= 0) return@runOnUiThread
+
+                val x = w * xRatio
+                val y = h * yRatio
+                val downTime = SystemClock.uptimeMillis()
+                val downEvent = MotionEvent.obtain(
+                    downTime,
+                    downTime,
+                    MotionEvent.ACTION_DOWN,
+                    x,
+                    y,
+                    0
+                )
+                try {
+                    webView.dispatchTouchEvent(downEvent)
+                } finally {
+                    downEvent.recycle()
+                }
+
+                webView.postDelayed({
+                    if (!canal2Active) return@postDelayed
+                    val upTime = SystemClock.uptimeMillis()
+                    val upEvent = MotionEvent.obtain(
+                        downTime,
+                        upTime,
+                        MotionEvent.ACTION_UP,
+                        x,
+                        y,
+                        0
+                    )
+                    try {
+                        webView.dispatchTouchEvent(upEvent)
+                    } finally {
+                        upEvent.recycle()
+                    }
+                }, 45L)
+            }
+            return true
+        }
+
         @JavascriptInterface
         fun onVideoAlive() {
             dispatchEventToMainWebView("loveflix:canal2-video-alive")

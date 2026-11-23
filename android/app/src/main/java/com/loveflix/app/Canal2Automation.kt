@@ -1,16 +1,82 @@
 package com.loveflix.app
 
 import org.json.JSONObject
+import java.util.Locale
 
 object Canal2Automation {
 
     const val WRAPPER_PATH_PREFIX = "https://love-flix.vercel.app/__canal2_wrapper"
 
+    private val STATIC_ASSET_EXTENSIONS = listOf(
+        ".js", ".mjs", ".css", ".map",
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico", ".avif",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".json", ".xml", ".txt",
+        ".m3u8", ".ts", ".m4s", ".mp4", ".webm", ".mp3", ".aac", ".vtt", ".srt"
+    )
+
     fun isAllowedCanal2Url(rawUrl: String?): Boolean {
         if (rawUrl.isNullOrBlank()) return false
-        val lower = rawUrl.lowercase()
+        val lower = rawUrl.lowercase(Locale.ROOT)
         return lower.startsWith("https://superflixapi.") ||
             lower.startsWith("http://superflixapi.")
+    }
+
+    fun isSuperFlixHost(host: String?): Boolean {
+        val clean = host?.lowercase(Locale.ROOT) ?: return false
+        return clean.contains("superflixapi")
+    }
+
+    fun isLikelyHtmlDocumentRequest(
+        url: String,
+        method: String,
+        headers: Map<String, String>?
+    ): Boolean {
+        val cleanMethod = method.uppercase(Locale.ROOT)
+        if (cleanMethod != "GET" && cleanMethod != "POST") return false
+
+        val path = url.substringBefore("?").substringBefore("#").lowercase(Locale.ROOT)
+        if (STATIC_ASSET_EXTENSIONS.any { path.endsWith(it) }) {
+            return false
+        }
+
+        if (cleanMethod == "POST") return true
+
+        var accept = ""
+        var secDest = ""
+        if (headers != null) {
+            for ((k, v) in headers) {
+                when (k.lowercase(Locale.ROOT)) {
+                    "accept" -> accept = v.lowercase(Locale.ROOT)
+                    "sec-fetch-dest" -> secDest = v.lowercase(Locale.ROOT)
+                }
+            }
+        }
+
+        if (secDest == "iframe" || secDest == "document") return true
+        if (accept.contains("text/html")) return true
+        return secDest.isEmpty() && accept.isEmpty()
+    }
+
+    fun injectScriptIntoHtml(html: String, scriptBody: String): String {
+        val safeJs = scriptBody.replace("</script", "<\\/script", ignoreCase = true)
+        val scriptTag = "<script data-lf-canal2=\"1\">\n$safeJs\n</script>"
+
+        val headOpenRegex = Regex("<head(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE)
+        val headMatch = headOpenRegex.find(html)
+        if (headMatch != null) {
+            val idx = headMatch.range.last + 1
+            return html.substring(0, idx) + "\n" + scriptTag + "\n" + html.substring(idx)
+        }
+
+        val htmlOpenRegex = Regex("<html(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE)
+        val htmlMatch = htmlOpenRegex.find(html)
+        if (htmlMatch != null) {
+            val idx = htmlMatch.range.last + 1
+            return html.substring(0, idx) + "\n<head>" + scriptTag + "</head>\n" + html.substring(idx)
+        }
+
+        return scriptTag + "\n" + html
     }
 
     fun buildEmbedWrapperHtml(
@@ -166,6 +232,55 @@ object Canal2Automation {
                     window.__LF_AUDIO_PREF = ${JSONObject.quote(safeAudio)};
                     window.__LF_INTRO_PLAYING = $introBool;
 
+                    var SELO_SKIP_SECONDS = 10;
+
+                    function syncNativeBridgeState() {
+                        try {
+                            var bridge = window.LoveFlixCanal2Bridge;
+                            if (!bridge) return;
+                            if (typeof bridge.isIntroPlaying === 'function') {
+                                window.__LF_INTRO_PLAYING = !!bridge.isIntroPlaying();
+                            }
+                            if (typeof bridge.getAudioPref === 'function') {
+                                var p = bridge.getAudioPref();
+                                if (p === 'original' || p === 'pt') {
+                                    window.__LF_AUDIO_PREF = p;
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                    syncNativeBridgeState();
+
+                    // Capture Turnstile POST form payload before submission so native interception can inject script
+                    function recordPendingFormPost(form) {
+                        try {
+                            if (!form || form.tagName !== 'FORM') return;
+                            var method = (form.getAttribute('method') || form.method || 'GET').toUpperCase();
+                            if (method !== 'POST') return;
+                            var bridge = window.LoveFlixCanal2Bridge;
+                            if (!bridge || typeof bridge.queuePendingPost !== 'function') return;
+                            var rawAction = form.getAttribute('action') || location.href;
+                            var resolvedUrl = rawAction;
+                            try {
+                                resolvedUrl = new URL(rawAction, location.href).href;
+                            } catch (uErr) {}
+                            resolvedUrl = resolvedUrl.split('#')[0];
+                            var params = new URLSearchParams(new FormData(form)).toString();
+                            bridge.queuePendingPost(resolvedUrl, params);
+                        } catch (e) {}
+                    }
+
+                    try {
+                        var origFormSubmit = HTMLFormElement.prototype.submit;
+                        HTMLFormElement.prototype.submit = function() {
+                            recordPendingFormPost(this);
+                            return origFormSubmit.apply(this, arguments);
+                        };
+                        document.addEventListener('submit', function(ev) {
+                            if (ev && ev.target) recordPendingFormPost(ev.target);
+                        }, true);
+                    } catch (e) {}
+
                     // 1. Block popups / new tabs inside player and subframes
                     try {
                         window.open = function() { return null; };
@@ -195,6 +310,21 @@ object Canal2Automation {
                             var target = doc.head || doc.documentElement;
                             if (target) target.appendChild(style);
                         } catch (e) {}
+                    }
+
+                    function hasDirectPlayerMounted(docRef) {
+                        var doc = docRef || document;
+                        if (!doc || !doc.querySelector) return false;
+                        var v = doc.querySelector('video');
+                        if (v && (v.readyState >= 2 || v.currentSrc || v.src)) return true;
+                        var iframes = doc.querySelectorAll('iframe');
+                        for (var i = 0; i < iframes.length; i++) {
+                            var s = (iframes[i].getAttribute('src') || '').toLowerCase();
+                            if (s && s.indexOf('cloudflare') === -1 && s.indexOf('about:blank') === -1) {
+                                return true;
+                            }
+                        }
+                        return false;
                     }
 
                     function isSuperFlixBadgeNode(el) {
@@ -298,7 +428,6 @@ object Canal2Automation {
 
                     function cleanBrandingAndOverlays(root) {
                         cleanBrandingInRoot(root || document, document);
-                        // Also walk any accessible same-origin / about:blank / srcdoc iframes
                         try {
                             var childFrames = document.querySelectorAll('iframe');
                             for (var f = 0; f < childFrames.length; f++) {
@@ -313,8 +442,21 @@ object Canal2Automation {
                         } catch (e) {}
                     }
 
-                    // 3. Intro Mute / Resume Sync across control frame & nested player frames
+                    // 3. Intro Mute / Resume Sync + Safe Initial Selo Skip across frames
                     var heldVideos = [];
+                    function trySkipInitialSelo(v) {
+                        try {
+                            if (!v || window.__LF_INTRO_PLAYING) return;
+                            if (v.dataset && v.dataset.lfSeloSkipped === '1') return;
+                            if (v.readyState >= 1 && isFinite(v.duration) && v.duration > 60 && v.currentTime < (SELO_SKIP_SECONDS - 1)) {
+                                if (v.dataset) v.dataset.lfSeloSkipped = '1';
+                                v.currentTime = SELO_SKIP_SECONDS;
+                            } else if (v.readyState >= 1 && isFinite(v.duration) && v.duration > 60 && v.currentTime >= (SELO_SKIP_SECONDS - 1)) {
+                                if (v.dataset) v.dataset.lfSeloSkipped = '1';
+                            }
+                        } catch (e) {}
+                    }
+
                     function enforceIntroMediaStateInDoc(docRef) {
                         var doc = docRef || document;
                         if (!doc || !doc.querySelectorAll) return;
@@ -333,6 +475,9 @@ object Canal2Automation {
                                 if (m.dataset && m.dataset.lfIntroMuted === '1') {
                                     m.muted = false;
                                     m.dataset.lfIntroMuted = '';
+                                }
+                                if (m.tagName === 'VIDEO') {
+                                    trySkipInitialSelo(m);
                                 }
                                 if (heldVideos.indexOf(m) !== -1) {
                                     try { m.play(); } catch (e) {}
@@ -368,11 +513,12 @@ object Canal2Automation {
                         }
                     }
 
-                    // Watch media elements for alive state & intro hold
+                    // Watch media elements for alive state, intro hold, and initial selo skip
                     var reportedAlive = false;
                     function reportVideoAlive() {
                         if (reportedAlive) return;
                         reportedAlive = true;
+                        try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onVideoAlive(); } catch (e) {}
                         try { window.top.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
                         if (!isControlFrame) {
                             try { window.parent.postMessage({ type: 'LF_CANAL2_VIDEO_ALIVE' }, '*'); } catch (e) {}
@@ -386,28 +532,37 @@ object Canal2Automation {
                         for (var i = 0; i < videos.length; i++) {
                             var v = videos[i];
                             if (v.dataset && v.dataset.lfWatched === '1') {
+                                trySkipInitialSelo(v);
                                 if (v.readyState >= 2 && (v.videoWidth > 0 || !v.paused)) {
                                     reportVideoAlive();
                                 }
                                 continue;
                             }
                             if (v.dataset) v.dataset.lfWatched = '1';
-                            v.addEventListener('play', function() {
-                                if (window.__LF_INTRO_PLAYING) {
-                                    enforceIntroMediaState();
-                                }
+                            v.addEventListener('loadedmetadata', function(ev) {
+                                trySkipInitialSelo(ev.currentTarget);
                             });
-                            v.addEventListener('loadeddata', function() {
-                                reportVideoAlive();
-                                enforceIntroMediaState();
-                            });
-                            v.addEventListener('playing', function() {
+                            v.addEventListener('play', function(ev) {
                                 if (window.__LF_INTRO_PLAYING) {
                                     enforceIntroMediaState();
                                 } else {
+                                    trySkipInitialSelo(ev.currentTarget);
+                                }
+                            });
+                            v.addEventListener('loadeddata', function(ev) {
+                                reportVideoAlive();
+                                enforceIntroMediaState();
+                                trySkipInitialSelo(ev.currentTarget);
+                            });
+                            v.addEventListener('playing', function(ev) {
+                                if (window.__LF_INTRO_PLAYING) {
+                                    enforceIntroMediaState();
+                                } else {
+                                    trySkipInitialSelo(ev.currentTarget);
                                     reportVideoAlive();
                                 }
                             });
+                            trySkipInitialSelo(v);
                             if (v.readyState >= 2 && v.videoWidth > 0) {
                                 reportVideoAlive();
                             }
@@ -419,7 +574,6 @@ object Canal2Automation {
                         enforceIntroMediaState();
                     }
 
-                    // Request authoritative state from top wrapper frame
                     try {
                         window.top.postMessage({ type: 'LF_CANAL2_QUERY_STATE' }, '*');
                     } catch (e) {}
@@ -503,10 +657,8 @@ object Canal2Automation {
                                 var r = parseInt(m[1], 10);
                                 var g = parseInt(m[2], 10);
                                 var b = parseInt(m[3], 10);
-                                // Ban icons often appear inside a non-red dark row with gray text
                                 var elCol = window.getComputedStyle(el).color || '';
                                 if (r >= 175 && g <= 80 && b <= 80 && elCol.indexOf('255, 255, 255') === -1) {
-                                    // Check if svg contains a diagonal line or multiple paths typical of globe-ban
                                     if (s.querySelector('line, [d*="M2 2"], [d*="m2 2"]')) return true;
                                 }
                             }
@@ -515,39 +667,56 @@ object Canal2Automation {
                     }
 
                     function isDisabledEl(el) {
-                        if (!el) return true;
-                        if (el.disabled) return true;
-                        if (el.getAttribute) {
-                            if (el.getAttribute('aria-disabled') === 'true' || el.getAttribute('data-disabled') === 'true') return true;
+                        var cur = el;
+                        for (var depth = 0; depth < 3 && cur && cur !== document.body; depth++) {
+                            if (cur.disabled) return true;
+                            if (cur.getAttribute) {
+                                if (cur.getAttribute('aria-disabled') === 'true' || cur.getAttribute('data-disabled') === 'true') return true;
+                            }
+                            var cls = (typeof cur.className === 'string' ? cur.className : '').toLowerCase();
+                            if (/(disabled|unavailable|offline|locked|bloqueado|indisponivel|cursor-not-allowed|pointer-events-none)/.test(cls)) return true;
+                            var cs = window.getComputedStyle(cur);
+                            if (cs && (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity || '1') < 0.65)) return true;
+                            if (depth === 0 && cur.querySelector && cur.querySelector('.fa-ban, .fa-lock, .fa-times-circle, .fa-circle-xmark, [class*="ban" i], [class*="disabled" i]')) {
+                                return true;
+                            }
+                            if (depth === 0 && hasRedBanSvg(cur)) return true;
+                            cur = cur.parentElement;
                         }
-                        var cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-                        if (/(disabled|unavailable|offline|locked|bloqueado|indisponivel|cursor-not-allowed|pointer-events-none)/.test(cls)) return true;
-                        var cs = window.getComputedStyle(el);
-                        if (cs && (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity || '1') < 0.65)) return true;
-                        if (el.querySelector && el.querySelector('.fa-ban, .fa-lock, .fa-times-circle, .fa-circle-xmark, [class*="ban" i], [class*="disabled" i]')) {
-                            return true;
+                        return false;
+                    }
+
+                    function hasRedAccentBackground(cs) {
+                        if (!cs) return false;
+                        var bg = cs.backgroundColor || '';
+                        var m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+                        if (m) {
+                            var r = parseInt(m[1], 10);
+                            var g = parseInt(m[2], 10);
+                            var b = parseInt(m[3], 10);
+                            if (r >= 165 && g <= 75 && b <= 85) return true;
                         }
-                        if (hasRedBanSvg(el)) return true;
+                        var img = cs.backgroundImage || '';
+                        if (img && img !== 'none') {
+                            if (/(#e50914|#ef4444|#dc2626|#f43f5e|#ff0000|rgb\(\s*2[0-5]\d\s*,\s*[0-6]?\d\s*,\s*[0-6]?\d)/i.test(img)) {
+                                return true;
+                            }
+                        }
                         return false;
                     }
 
                     function isActiveEl(el) {
-                        if (!el) return false;
-                        if (el.getAttribute) {
-                            if (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-pressed') === 'true') return true;
-                            if (el.getAttribute('data-active') === 'true' || el.getAttribute('data-selected') === 'true') return true;
-                        }
-                        var cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-                        if (/\b(active|selected|current)\b/.test(cls) || /bg-red|bg-\[#e50914\]|border-red/.test(cls)) return true;
-                        var cs = window.getComputedStyle(el);
-                        if (cs && cs.backgroundColor) {
-                            var m = cs.backgroundColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-                            if (m) {
-                                var r = parseInt(m[1], 10);
-                                var g = parseInt(m[2], 10);
-                                var b = parseInt(m[3], 10);
-                                if (r >= 175 && g <= 65 && b <= 75) return true;
+                        var cur = el;
+                        for (var depth = 0; depth < 3 && cur && cur !== document.body; depth++) {
+                            if (cur.getAttribute) {
+                                if (cur.getAttribute('aria-selected') === 'true' || cur.getAttribute('aria-pressed') === 'true') return true;
+                                if (cur.getAttribute('data-active') === 'true' || cur.getAttribute('data-selected') === 'true') return true;
                             }
+                            var cls = (typeof cur.className === 'string' ? cur.className : '').toLowerCase();
+                            if (/\b(active|selected|current)\b/.test(cls) || /bg-red|bg-\[#e50914\]|border-red/.test(cls)) return true;
+                            var cs = window.getComputedStyle(cur);
+                            if (hasRedAccentBackground(cs)) return true;
+                            cur = cur.parentElement;
                         }
                         return false;
                     }
@@ -556,7 +725,7 @@ object Canal2Automation {
                         var tag = (el.tagName || '').toUpperCase();
                         if (tag === 'BUTTON' || tag === 'A' || tag === 'LI') return true;
                         if (el.getAttribute) {
-                            if (el.getAttribute('role') === 'button' || el.getAttribute('onclick')) return true;
+                            if (el.getAttribute('role') === 'button' || el.getAttribute('role') === 'tab' || el.getAttribute('onclick')) return true;
                             if (el.hasAttribute('data-server') || el.hasAttribute('data-player') || el.hasAttribute('data-id') || el.hasAttribute('data-lang') || el.hasAttribute('data-audio')) return true;
                         }
                         var cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
@@ -569,8 +738,21 @@ object Canal2Automation {
                         return false;
                     }
 
+                    function containsInteractiveAncestorWithSameText(el, txt) {
+                        var p = el.parentElement;
+                        while (p && p !== document.body) {
+                            var pTxt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
+                            if (pTxt === txt && isInteractiveCandidate(p, pTxt)) {
+                                return true;
+                            }
+                            if (pTxt.length > txt.length) break;
+                            p = p.parentElement;
+                        }
+                        return false;
+                    }
+
                     function getClickableNodes() {
-                        var sel = 'button, a, [role="button"], li, div, span, label, p, section, article';
+                        var sel = 'button, a, [role="button"], [role="tab"], li, div, span, label, p';
                         var raw = document.querySelectorAll(sel);
                         var out = [];
                         var seen = [];
@@ -579,58 +761,59 @@ object Canal2Automation {
                             if (!isVisibleEl(el)) continue;
                             var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
                             if (!txt || txt.length > 60) continue;
+                            var lower = txt.toLowerCase();
+                            if (lower.indexOf('dublado') !== -1 && lower.indexOf('legendado') !== -1) continue;
+                            if (lower.indexOf('principal') !== -1 && lower.indexOf('alternativo') !== -1) continue;
                             if (!isInteractiveCandidate(el, txt)) continue;
-                            // Skip outer wrapper if an inner child already represents the exact same single label
-                            var hasSameTextChild = false;
-                            if (el.children && el.children.length > 0 && el.tagName !== 'BUTTON' && el.tagName !== 'A') {
-                                for (var c = 0; c < el.children.length; c++) {
-                                    var childTxt = (el.children[c].innerText || el.children[c].textContent || '').replace(/\s+/g, ' ').trim();
-                                    if (childTxt === txt && isInteractiveCandidate(el.children[c], childTxt)) {
-                                        hasSameTextChild = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (hasSameTextChild) continue;
+                            // Prefer the outermost interactive card/tab/button for this single label (so icons/backgrounds are preserved)
+                            if (containsInteractiveAncestorWithSameText(el, txt)) continue;
                             if (seen.indexOf(el) !== -1) continue;
                             seen.push(el);
-                            out.push({ el: el, text: txt, lower: txt.toLowerCase() });
+                            out.push({ el: el, text: txt, lower: lower });
                         }
                         return out;
                     }
 
-                    function triggerRealClick(el) {
+                    function triggerJsClick(el) {
                         if (!el) return;
-                        try {
-                            el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-                        } catch (e) {}
-                        try {
-                            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                        } catch (e) {}
-                        try {
-                            el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
-                        } catch (e) {}
-                        try {
-                            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                        } catch (e) {}
-                        try {
-                            el.click();
-                        } catch (e) {}
+                        try { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch (e) {}
+                        try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
+                        try { el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true })); } catch (e) {}
+                        try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch (e) {}
+                        try { el.click(); } catch (e) {}
                     }
 
-                    function hasDirectPlayerMounted(docRef) {
-                        var doc = docRef || document;
-                        if (!doc || !doc.querySelector) return false;
-                        var v = doc.querySelector('video');
-                        if (v && (v.readyState >= 2 || v.currentSrc || v.src)) return true;
-                        var iframes = doc.querySelectorAll('iframe');
-                        for (var i = 0; i < iframes.length; i++) {
-                            var s = (iframes[i].getAttribute('src') || '').toLowerCase();
-                            if (s && s.indexOf('cloudflare') === -1 && s.indexOf('about:blank') === -1) {
+                    function triggerNativeTapOrClick(el, preferJsBackup) {
+                        if (!el) return false;
+                        if (preferJsBackup) {
+                            triggerJsClick(el);
+                            return true;
+                        }
+                        try {
+                            var rect = el.getBoundingClientRect();
+                            var vw = window.innerWidth || document.documentElement.clientWidth || 0;
+                            var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+                            if (
+                                isControlFrame &&
+                                rect && rect.width > 4 && rect.height > 4 &&
+                                vw > 10 && vh > 10 &&
+                                window.LoveFlixCanal2Bridge &&
+                                typeof window.LoveFlixCanal2Bridge.nativeTapAt === 'function'
+                            ) {
+                                var cx = rect.left + rect.width * 0.5;
+                                var cy = rect.top + rect.height * 0.5;
+                                var hit = document.elementFromPoint(cx, cy);
+                                if (hit && hit !== el && !el.contains(hit) && isTransparentClickShield(hit)) {
+                                    hideNode(hit);
+                                }
+                                var nx = Math.max(0.01, Math.min(0.99, cx / vw));
+                                var ny = Math.max(0.01, Math.min(0.99, cy / vh));
+                                window.LoveFlixCanal2Bridge.nativeTapAt(nx, ny);
                                 return true;
                             }
-                        }
-                        return false;
+                        } catch (e) {}
+                        triggerJsClick(el);
+                        return true;
                     }
 
                     function findServerCandidates(nodes) {
@@ -706,6 +889,7 @@ object Canal2Automation {
                     var audioLastClickAt = 0;
                     var audioClickAttempts = 0;
                     var serverClickedAt = 0;
+                    var serverJsBackupAttempted = false;
                     var activeServerKey = null;
                     var unavailableNotified = false;
                     var challengeNotified = false;
@@ -746,14 +930,14 @@ object Canal2Automation {
                         }
 
                         if (preferredList.length > 0) {
-                            if (audioClickAttempts >= 2) {
+                            if (audioClickAttempts >= 3) {
                                 audioHandled = true;
                                 return false;
                             }
                             if ((Date.now() - audioLastClickAt) > 650) {
                                 audioLastClickAt = Date.now();
                                 audioClickAttempts += 1;
-                                triggerRealClick(preferredList[0].el);
+                                triggerNativeTapOrClick(preferredList[0].el, audioClickAttempts >= 2);
                                 return true;
                             }
                             return true;
@@ -767,6 +951,7 @@ object Canal2Automation {
                         if (unavailableNotified) return;
                         unavailableNotified = true;
                         clearTriedServers();
+                        try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onUnavailable(); } catch (e) {}
                         try { window.top.postMessage({ type: 'LF_CANAL2_UNAVAILABLE' }, '*'); } catch (e) {}
                     }
 
@@ -785,6 +970,7 @@ object Canal2Automation {
                         if (hasTurnstileGate()) {
                             if (!challengeNotified) {
                                 challengeNotified = true;
+                                try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onChallengeVisible(); } catch (e) {}
                                 try { window.top.postMessage({ type: 'LF_CANAL2_CHALLENGE_VISIBLE' }, '*'); } catch (e) {}
                             }
                             return;
@@ -808,14 +994,27 @@ object Canal2Automation {
                         if (activeServerKey && !window.__lfPlaybackConfirmed) {
                             var elapsed = Date.now() - serverClickedAt;
                             var iframeMounted = hasDirectPlayerMounted();
-                            var timedOut = iframeMounted ? (elapsed > 13000) : (elapsed > 8500);
+
+                            // If server modal is still visible 1.8s after native tap, also fire JS click backup once
+                            if (!iframeMounted && !serverJsBackupAttempted && elapsed > 1800) {
+                                for (var sIdx = 0; sIdx < servers.length; sIdx++) {
+                                    if (servers[sIdx].key === activeServerKey) {
+                                        serverJsBackupAttempted = true;
+                                        triggerJsClick(servers[sIdx].el);
+                                        return;
+                                    }
+                                }
+                            }
+
+                            var timedOut = iframeMounted ? (elapsed > 13000) : (elapsed > 7500);
                             if (hasPlayerErrorBanner() || window.__lfSubframeError || timedOut) {
                                 addTriedServer(activeServerKey);
                                 activeServerKey = null;
+                                serverJsBackupAttempted = false;
                                 window.__lfSubframeError = false;
                                 var backBtn = findBackButton(nodes);
                                 if (backBtn) {
-                                    triggerRealClick(backBtn);
+                                    triggerNativeTapOrClick(backBtn, false);
                                     return;
                                 }
                                 var freshServers = findServerCandidates(nodes);
@@ -844,8 +1043,9 @@ object Canal2Automation {
                             }
                             activeServerKey = nextServer.key;
                             serverClickedAt = Date.now();
+                            serverJsBackupAttempted = false;
                             window.__lfSubframeError = false;
-                            triggerRealClick(nextServer.el);
+                            triggerNativeTapOrClick(nextServer.el, false);
                             return;
                         }
 
@@ -863,6 +1063,7 @@ object Canal2Automation {
                     }
 
                     function startLoop() {
+                        syncNativeBridgeState();
                         cleanBrandingAndOverlays(document);
                         wireMediaWatchers();
                         if (isControlFrame) runControlAutomationTick();
@@ -877,6 +1078,7 @@ object Canal2Automation {
 
                     try {
                         var mo = new MutationObserver(function() {
+                            syncNativeBridgeState();
                             cleanBrandingAndOverlays(document);
                             wireMediaWatchers();
                         });
@@ -884,6 +1086,7 @@ object Canal2Automation {
                     } catch (e) {}
 
                     setInterval(function() {
+                        syncNativeBridgeState();
                         cleanBrandingAndOverlays(document);
                         wireMediaWatchers();
                         if (isControlFrame) runControlAutomationTick();
