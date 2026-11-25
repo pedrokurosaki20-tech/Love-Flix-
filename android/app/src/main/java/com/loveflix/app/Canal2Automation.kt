@@ -7,76 +7,11 @@ object Canal2Automation {
 
     const val WRAPPER_PATH_PREFIX = "https://love-flix.vercel.app/__canal2_wrapper"
 
-    private val STATIC_ASSET_EXTENSIONS = listOf(
-        ".js", ".mjs", ".css", ".map",
-        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico", ".avif",
-        ".woff", ".woff2", ".ttf", ".otf", ".eot",
-        ".json", ".xml", ".txt",
-        ".m3u8", ".ts", ".m4s", ".mp4", ".webm", ".mp3", ".aac", ".vtt", ".srt"
-    )
-
     fun isAllowedCanal2Url(rawUrl: String?): Boolean {
         if (rawUrl.isNullOrBlank()) return false
         val lower = rawUrl.lowercase(Locale.ROOT)
         return lower.startsWith("https://superflixapi.") ||
             lower.startsWith("http://superflixapi.")
-    }
-
-    fun isSuperFlixHost(host: String?): Boolean {
-        val clean = host?.lowercase(Locale.ROOT) ?: return false
-        return clean.contains("superflixapi")
-    }
-
-    fun isLikelyHtmlDocumentRequest(
-        url: String,
-        method: String,
-        headers: Map<String, String>?
-    ): Boolean {
-        val cleanMethod = method.uppercase(Locale.ROOT)
-        if (cleanMethod != "GET" && cleanMethod != "POST") return false
-
-        val path = url.substringBefore("?").substringBefore("#").lowercase(Locale.ROOT)
-        if (STATIC_ASSET_EXTENSIONS.any { path.endsWith(it) }) {
-            return false
-        }
-
-        if (cleanMethod == "POST") return true
-
-        var accept = ""
-        var secDest = ""
-        if (headers != null) {
-            for ((k, v) in headers) {
-                when (k.lowercase(Locale.ROOT)) {
-                    "accept" -> accept = v.lowercase(Locale.ROOT)
-                    "sec-fetch-dest" -> secDest = v.lowercase(Locale.ROOT)
-                }
-            }
-        }
-
-        if (secDest == "iframe" || secDest == "document") return true
-        if (accept.contains("text/html")) return true
-        return secDest.isEmpty() && accept.isEmpty()
-    }
-
-    fun injectScriptIntoHtml(html: String, scriptBody: String): String {
-        val safeJs = scriptBody.replace("</script", "<\\/script", ignoreCase = true)
-        val scriptTag = "<script data-lf-canal2=\"1\">\n$safeJs\n</script>"
-
-        val headOpenRegex = Regex("<head(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE)
-        val headMatch = headOpenRegex.find(html)
-        if (headMatch != null) {
-            val idx = headMatch.range.last + 1
-            return html.substring(0, idx) + "\n" + scriptTag + "\n" + html.substring(idx)
-        }
-
-        val htmlOpenRegex = Regex("<html(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE)
-        val htmlMatch = htmlOpenRegex.find(html)
-        if (htmlMatch != null) {
-            val idx = htmlMatch.range.last + 1
-            return html.substring(0, idx) + "\n<head>" + scriptTag + "</head>\n" + html.substring(idx)
-        }
-
-        return scriptTag + "\n" + html
     }
 
     fun buildEmbedWrapperHtml(
@@ -250,36 +185,13 @@ object Canal2Automation {
                         } catch (e) {}
                     }
                     syncNativeBridgeState();
-
-                    // Capture Turnstile POST form payload before submission so native interception can inject script
-                    function recordPendingFormPost(form) {
+                    if (isControlFrame) {
                         try {
-                            if (!form || form.tagName !== 'FORM') return;
-                            var method = (form.getAttribute('method') || form.method || 'GET').toUpperCase();
-                            if (method !== 'POST') return;
-                            var bridge = window.LoveFlixCanal2Bridge;
-                            if (!bridge || typeof bridge.queuePendingPost !== 'function') return;
-                            var rawAction = form.getAttribute('action') || location.href;
-                            var resolvedUrl = rawAction;
-                            try {
-                                resolvedUrl = new URL(rawAction, location.href).href;
-                            } catch (uErr) {}
-                            resolvedUrl = resolvedUrl.split('#')[0];
-                            var params = new URLSearchParams(new FormData(form)).toString();
-                            bridge.queuePendingPost(resolvedUrl, params);
+                            window.LoveFlixCanal2Bridge &&
+                                typeof window.LoveFlixCanal2Bridge.onControlFrameAttached === 'function' &&
+                                window.LoveFlixCanal2Bridge.onControlFrameAttached(location.href || '');
                         } catch (e) {}
                     }
-
-                    try {
-                        var origFormSubmit = HTMLFormElement.prototype.submit;
-                        HTMLFormElement.prototype.submit = function() {
-                            recordPendingFormPost(this);
-                            return origFormSubmit.apply(this, arguments);
-                        };
-                        document.addEventListener('submit', function(ev) {
-                            if (ev && ev.target) recordPendingFormPost(ev.target);
-                        }, true);
-                    } catch (e) {}
 
                     // 1. Block popups / new tabs inside player and subframes
                     try {
@@ -337,7 +249,7 @@ object Canal2Automation {
                         ) {
                             return false;
                         }
-                        if (el.querySelector && (el.querySelector('video') || el.querySelector('iframe') || el.querySelector('button'))) {
+                        if (el.querySelector && (el.querySelector('video') || el.querySelector('iframe') || el.querySelector('button') || el.querySelector('a') || el.querySelector('[role="button"]'))) {
                             return false;
                         }
                         var cls = (typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '');
@@ -353,7 +265,7 @@ object Canal2Automation {
                         if (!el || el.nodeType !== 1) return false;
                         var tag = (el.tagName || '').toUpperCase();
                         if (tag !== 'DIV' && tag !== 'A' && tag !== 'SPAN') return false;
-                        if (el.querySelector && (el.querySelector('video') || el.querySelector('iframe') || el.querySelector('button') || el.querySelector('input'))) {
+                        if (el.querySelector && (el.querySelector('video') || el.querySelector('iframe') || el.querySelector('button') || el.querySelector('input') || el.querySelector('[role="button"]'))) {
                             return false;
                         }
                         var txt = (el.innerText || '').trim();
@@ -542,6 +454,9 @@ object Canal2Automation {
                             v.addEventListener('loadedmetadata', function(ev) {
                                 trySkipInitialSelo(ev.currentTarget);
                             });
+                            v.addEventListener('canplay', function(ev) {
+                                trySkipInitialSelo(ev.currentTarget);
+                            });
                             v.addEventListener('play', function(ev) {
                                 if (window.__LF_INTRO_PLAYING) {
                                     enforceIntroMediaState();
@@ -676,7 +591,7 @@ object Canal2Automation {
                             var cls = (typeof cur.className === 'string' ? cur.className : '').toLowerCase();
                             if (/(disabled|unavailable|offline|locked|bloqueado|indisponivel|cursor-not-allowed|pointer-events-none)/.test(cls)) return true;
                             var cs = window.getComputedStyle(cur);
-                            if (cs && (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity || '1') < 0.65)) return true;
+                            if (cs && (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity || '1') < 0.4)) return true;
                             if (depth === 0 && cur.querySelector && cur.querySelector('.fa-ban, .fa-lock, .fa-times-circle, .fa-circle-xmark, [class*="ban" i], [class*="disabled" i]')) {
                                 return true;
                             }
@@ -738,14 +653,19 @@ object Canal2Automation {
                         return false;
                     }
 
+                    function normalizeLabelText(raw) {
+                        return (raw || '').replace(/[›»>]+$/g, '').replace(/\s+/g, ' ').trim();
+                    }
+
                     function containsInteractiveAncestorWithSameText(el, txt) {
+                        var normTxt = normalizeLabelText(txt);
                         var p = el.parentElement;
                         while (p && p !== document.body) {
-                            var pTxt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
-                            if (pTxt === txt && isInteractiveCandidate(p, pTxt)) {
+                            var pNorm = normalizeLabelText(p.innerText || p.textContent || '');
+                            if (pNorm === normTxt && isInteractiveCandidate(p, pNorm)) {
                                 return true;
                             }
-                            if (pTxt.length > txt.length) break;
+                            if (pNorm.length > normTxt.length + 2) break;
                             p = p.parentElement;
                         }
                         return false;
@@ -759,7 +679,7 @@ object Canal2Automation {
                         for (var i = 0; i < raw.length; i++) {
                             var el = raw[i];
                             if (!isVisibleEl(el)) continue;
-                            var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                            var txt = normalizeLabelText(el.innerText || el.textContent || '');
                             if (!txt || txt.length > 60) continue;
                             var lower = txt.toLowerCase();
                             if (lower.indexOf('dublado') !== -1 && lower.indexOf('legendado') !== -1) continue;
@@ -776,10 +696,18 @@ object Canal2Automation {
 
                     function triggerJsClick(el) {
                         if (!el) return;
-                        try { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch (e) {}
-                        try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
-                        try { el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true })); } catch (e) {}
-                        try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch (e) {}
+                        var cx = 0;
+                        var cy = 0;
+                        try {
+                            var r = el.getBoundingClientRect();
+                            cx = Math.round(r.left + r.width * 0.5);
+                            cy = Math.round(r.top + r.height * 0.5);
+                        } catch (e) {}
+                        var evOpts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy };
+                        try { el.dispatchEvent(new PointerEvent('pointerdown', evOpts)); } catch (e) {}
+                        try { el.dispatchEvent(new MouseEvent('mousedown', evOpts)); } catch (e) {}
+                        try { el.dispatchEvent(new PointerEvent('pointerup', evOpts)); } catch (e) {}
+                        try { el.dispatchEvent(new MouseEvent('mouseup', evOpts)); } catch (e) {}
                         try { el.click(); } catch (e) {}
                     }
 
@@ -787,7 +715,6 @@ object Canal2Automation {
                         if (!el) return false;
                         if (preferJsBackup) {
                             triggerJsClick(el);
-                            return true;
                         }
                         try {
                             var rect = el.getBoundingClientRect();
@@ -812,7 +739,9 @@ object Canal2Automation {
                                 return true;
                             }
                         } catch (e) {}
-                        triggerJsClick(el);
+                        if (!preferJsBackup) {
+                            triggerJsClick(el);
+                        }
                         return true;
                     }
 
@@ -867,14 +796,16 @@ object Canal2Automation {
                         return false;
                     }
 
-                    function hasExplicitUnavailablePage() {
+                    function hasExplicitUnavailablePage(nodes) {
                         var txt = ((document.body && document.body.innerText) || '').trim();
                         if (!txt) return false;
                         if (/acesso\s+restrito[\s\S]*visualiza[cç][aã]o\s+externa/i.test(txt)) {
                             return true;
                         }
-                        var hasPlayerOrBtns = !!document.querySelector('video, iframe:not([src*="cloudflare"]), button');
-                        if (!hasPlayerOrBtns && /\b404\b.*not\s*found|conte[uú]do\s+(n[aã]o\s+encontrado|indispon[ií]vel)/i.test(txt)) {
+                        var hasPlayer = hasDirectPlayerMounted();
+                        var hasButtonsOrServers = !!document.querySelector('video, iframe:not([src*="cloudflare"]), button') ||
+                            (nodes && findServerCandidates(nodes).length > 0);
+                        if (!hasPlayer && !hasButtonsOrServers && (/\b404\b.*not\s*found/i.test(txt) || /conte[uú]do\s+(n[aã]o\s+encontrado|indispon[ií]vel)|filme\s+n[aã]o\s+encontrado|s[eé]rie\s+n[aã]o\s+encontrada/i.test(txt))) {
                             return true;
                         }
                         return false;
@@ -968,6 +899,9 @@ object Canal2Automation {
                         if (!isControlFrame || unavailableNotified) return;
 
                         if (hasTurnstileGate()) {
+                            if (activeServerKey) {
+                                serverClickedAt = Date.now();
+                            }
                             if (!challengeNotified) {
                                 challengeNotified = true;
                                 try { window.LoveFlixCanal2Bridge && window.LoveFlixCanal2Bridge.onChallengeVisible(); } catch (e) {}
@@ -976,12 +910,12 @@ object Canal2Automation {
                             return;
                         }
 
-                        if (hasExplicitUnavailablePage()) {
+                        var nodes = getClickableNodes();
+
+                        if (hasExplicitUnavailablePage(nodes)) {
                             notifyUnavailable();
                             return;
                         }
-
-                        var nodes = getClickableNodes();
 
                         if (!audioHandled) {
                             var clickedAudio = trySelectAudio(nodes);
@@ -990,31 +924,45 @@ object Canal2Automation {
 
                         var servers = findServerCandidates(nodes);
                         var tried = getTriedServers();
+                        var iframeMounted = hasDirectPlayerMounted();
+
+                        // As soon as a server mounts a player iframe/video without an error banner, clear the spinner and never jump away
+                        if (iframeMounted && !hasPlayerErrorBanner() && !window.__lfSubframeError) {
+                            window.__lfPlaybackConfirmed = true;
+                            clearTriedServers();
+                            reportVideoAlive();
+                            return;
+                        }
 
                         if (activeServerKey && !window.__lfPlaybackConfirmed) {
-                            var elapsed = Date.now() - serverClickedAt;
-                            var iframeMounted = hasDirectPlayerMounted();
+                            // Never advance server timeout while Love Flix opening intro is holding playback
+                            if (window.__LF_INTRO_PLAYING) {
+                                serverClickedAt = Date.now();
+                                return;
+                            }
 
-                            // If server modal is still visible 1.8s after native tap, also fire JS click backup once
-                            if (!iframeMounted && !serverJsBackupAttempted && elapsed > 1800) {
+                            var elapsed = Date.now() - serverClickedAt;
+
+                            // If server modal is still visible 1.2s after native tap, fire JS + native backup once
+                            if (!iframeMounted && !serverJsBackupAttempted && elapsed > 1200) {
                                 for (var sIdx = 0; sIdx < servers.length; sIdx++) {
                                     if (servers[sIdx].key === activeServerKey) {
                                         serverJsBackupAttempted = true;
-                                        triggerJsClick(servers[sIdx].el);
+                                        triggerNativeTapOrClick(servers[sIdx].el, true);
                                         return;
                                     }
                                 }
                             }
 
-                            var timedOut = iframeMounted ? (elapsed > 13000) : (elapsed > 7500);
-                            if (hasPlayerErrorBanner() || window.__lfSubframeError || timedOut) {
+                            var failedToMountAnyPlayer = !iframeMounted && (elapsed > 8500);
+                            if (hasPlayerErrorBanner() || window.__lfSubframeError || failedToMountAnyPlayer) {
                                 addTriedServer(activeServerKey);
                                 activeServerKey = null;
                                 serverJsBackupAttempted = false;
                                 window.__lfSubframeError = false;
                                 var backBtn = findBackButton(nodes);
                                 if (backBtn) {
-                                    triggerNativeTapOrClick(backBtn, false);
+                                    triggerNativeTapOrClick(backBtn, true);
                                     return;
                                 }
                                 var freshServers = findServerCandidates(nodes);
@@ -1022,7 +970,7 @@ object Canal2Automation {
                                 if (hasMore) {
                                     location.reload();
                                     return;
-                                } else {
+                                } else if (!hasDirectPlayerMounted()) {
                                     notifyUnavailable();
                                     return;
                                 }
@@ -1038,7 +986,9 @@ object Canal2Automation {
                                 }
                             }
                             if (!nextServer) {
-                                notifyUnavailable();
+                                if (!hasDirectPlayerMounted()) {
+                                    notifyUnavailable();
+                                }
                                 return;
                             }
                             activeServerKey = nextServer.key;
@@ -1049,16 +999,10 @@ object Canal2Automation {
                             return;
                         }
 
-                        if (!activeServerKey && servers.length === 0 && hasDirectPlayerMounted()) {
-                            var videosNow = document.querySelectorAll('video');
-                            for (var x = 0; x < videosNow.length; x++) {
-                                if (videosNow[x].readyState >= 2) {
-                                    window.__lfPlaybackConfirmed = true;
-                                    clearTriedServers();
-                                    reportVideoAlive();
-                                    break;
-                                }
-                            }
+                        if (!activeServerKey && servers.length === 0 && iframeMounted) {
+                            window.__lfPlaybackConfirmed = true;
+                            clearTriedServers();
+                            reportVideoAlive();
                         }
                     }
 

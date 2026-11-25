@@ -27,6 +27,7 @@ export interface SuperCdnResolvedEntry {
   embedOrigin?: string;
   directMediaUrl?: string;
   subtitleTracks?: SubtitleTrackItem[];
+  transientError?: boolean;
   expiresAt: number;
 }
 
@@ -224,24 +225,47 @@ async function resolveAllTitleProviders(params: {
 
     if (hasValidImdb) {
       const pageController = new AbortController();
-      const pageTimeout = setTimeout(() => pageController.abort(), 9000);
+      const pageTimeout = setTimeout(() => pageController.abort(), 6500);
 
       try {
-        const sessionCookie = await getSuperCdnCookie();
-        const pageRes = await fetch(superCdnPageUrl, {
+        const cachedCookie =
+          cachedSuperCdnCookie && cachedSuperCdnCookie.expiresAt > Date.now()
+            ? cachedSuperCdnCookie.cookie
+            : '';
+        let pageRes = await fetch(superCdnPageUrl, {
           method: 'GET',
           headers: {
             Referer: `${SUPERCDN_BASE_URL}/`,
             'User-Agent': BROWSER_USER_AGENT,
             Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-            ...(sessionCookie ? { Cookie: sessionCookie } : {}),
+            ...(cachedCookie ? { Cookie: cachedCookie } : {}),
           },
           signal: pageController.signal,
         });
+
+        let activeCookie = cachedCookie;
+        if (pageRes.status === 401 || pageRes.status === 403) {
+          const freshCookie = await getSuperCdnCookie();
+          if (freshCookie) {
+            activeCookie = freshCookie;
+            pageRes = await fetch(superCdnPageUrl, {
+              method: 'GET',
+              headers: {
+                Referer: `${SUPERCDN_BASE_URL}/`,
+                'User-Agent': BROWSER_USER_AGENT,
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                Cookie: freshCookie,
+              },
+              signal: pageController.signal,
+            });
+          }
+        }
+
         pageOk = pageRes.ok;
         const respCookies = extractCookieHeader(pageRes.headers);
-        cookieHeader = respCookies || sessionCookie;
+        cookieHeader = respCookies || activeCookie;
         html = pageRes.ok ? await pageRes.text() : '';
       } catch {
         pageOk = false;
@@ -254,7 +278,8 @@ async function resolveAllTitleProviders(params: {
     const seenIds = new Set<string>();
     const pushCandidate = (idRaw: string, isDublado: boolean) => {
       const id = idRaw.trim();
-      if (id && !seenIds.has(id)) {
+      const isValidId = id.startsWith('dyn:') || /^\d+$/.test(id);
+      if (id && isValidId && !seenIds.has(id)) {
         seenIds.add(id);
         candidates.push({ videoId: id, isDublado });
       }
@@ -666,31 +691,56 @@ export async function resolveSuperCdnChannel(params: {
     if (parsedUrl && (parsedHost.includes('vaiquecol') || parsedHost.includes('plenoflu'))) {
       const embedOrigin = parsedUrl.origin;
       let embedRes: Response | null = null;
-      try {
-        embedRes = await fetch(resolvedStreamUrl, {
-          method: 'GET',
-          headers: {
-            Referer: `${SUPERCDN_BASE_URL}/`,
-            'User-Agent': BROWSER_USER_AGENT,
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-          signal: AbortSignal.timeout(6500),
-        });
-      } catch {
-        embedRes = null;
+      let deterministicUnavailable = false;
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          embedRes = await fetch(resolvedStreamUrl, {
+            method: 'GET',
+            headers: {
+              Referer: `${SUPERCDN_BASE_URL}/`,
+              'User-Agent': BROWSER_USER_AGENT,
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            signal: AbortSignal.timeout(4800),
+          });
+          if (embedRes.ok || embedRes.status === 404 || embedRes.status === 410) {
+            break;
+          }
+          if (attempt === 0 && (embedRes.status >= 500 || embedRes.status === 429)) {
+            await new Promise((r) => setTimeout(r, 180));
+            continue;
+          }
+          break;
+        } catch {
+          embedRes = null;
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 180));
+          }
+        }
+      }
+
+      if (embedRes && (embedRes.status === 404 || embedRes.status === 410)) {
+        deterministicUnavailable = true;
       }
 
       if (embedRes && embedRes.ok && embedRes.status === 200) {
         const embedCookies = extractCookieHeader(embedRes.headers);
         const embedHtml = await embedRes.text();
 
-        const isApache404 =
+        const isUnavailableEmbedHtml =
           embedHtml.includes('404 Not Found') ||
           embedHtml.includes('The requested URL was not found on this server') ||
           embedHtml.includes('ErrorDocument to handle the request') ||
-          embedHtml.includes('Acesso proibido');
+          embedHtml.includes('Acesso proibido') ||
+          /<title>\s*Desculpas\s*<\/title>/i.test(embedHtml) ||
+          /o\s+v[ií]deo\s+que\s+voc[eê]\s+procura\s+n[aã]o\s+est[aá]\s+dispon[ií]vel/i.test(
+            embedHtml
+          );
 
-        if (!isApache404) {
+        if (isUnavailableEmbedHtml) {
+          deterministicUnavailable = true;
+        } else {
           const unpacked = unpackDeanEdwards(embedHtml);
           const fpHashMatch =
             unpacked.match(/FirePlayer\(\s*["']([a-f0-9]{32})["']/i) ||
@@ -742,73 +792,86 @@ export async function resolveSuperCdnChannel(params: {
             }
           }
 
-          if (fireHash) {
-            try {
-              const videoApiRes = await fetch(
-                `${embedOrigin}/player/index.php?data=${fireHash}&do=getVideo`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    Referer: resolvedStreamUrl,
-                    Origin: embedOrigin,
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'User-Agent': BROWSER_USER_AGENT,
-                    ...(embedCookies ? { Cookie: embedCookies } : {}),
-                  },
-                  body: new URLSearchParams({
-                    hash: fireHash,
-                    r: `${SUPERCDN_BASE_URL}/`,
-                  }).toString(),
-                  signal: AbortSignal.timeout(7500),
-                }
-              );
+          if (!fireHash) {
+            deterministicUnavailable = true;
+          } else {
+            for (let vAttempt = 0; vAttempt < 2; vAttempt++) {
+              try {
+                const videoApiRes = await fetch(
+                  `${embedOrigin}/player/index.php?data=${fireHash}&do=getVideo`,
+                  {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                      Referer: resolvedStreamUrl,
+                      Origin: embedOrigin,
+                      'X-Requested-With': 'XMLHttpRequest',
+                      'User-Agent': BROWSER_USER_AGENT,
+                      ...(embedCookies ? { Cookie: embedCookies } : {}),
+                    },
+                    body: new URLSearchParams({
+                      hash: fireHash,
+                      r: `${SUPERCDN_BASE_URL}/`,
+                    }).toString(),
+                    signal: AbortSignal.timeout(5500),
+                  }
+                );
 
-              if (videoApiRes.ok) {
-                const rawVideoBody = await videoApiRes.text();
-                let videoJson: {
-                  videoSource?: string;
-                  securedLink?: string;
-                  videoImage?: string;
-                } | null = null;
-                try {
-                  videoJson = JSON.parse(rawVideoBody);
-                } catch {
-                  videoJson = null;
-                }
-
-                const masterHlsUrl = (videoJson?.videoSource || videoJson?.securedLink || '').trim();
-                if (masterHlsUrl && /^https?:\/\//i.test(masterHlsUrl)) {
-                  const proxiedMasterPath = buildHlsProxyPath(
-                    masterHlsUrl,
-                    embedOrigin,
-                    'manifest',
-                    audioPref
-                  );
-                  const playerHtml = renderDirectVideoHtml(proxiedMasterPath, subtitleTracks, null);
-                  const entry: SuperCdnResolvedEntry = {
-                    kind: 'html',
-                    available: true,
-                    resolvedChannel: 1,
-                    html: playerHtml,
-                    masterHlsUrl,
-                    embedOrigin,
-                    subtitleTracks,
-                    expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
-                  };
-                  superCdnStreamCache.set(cacheKey, entry);
-
-                  if (warmOnly) {
-                    await warmInitialHlsStream(masterHlsUrl, embedOrigin, true, audioPref);
-                  } else {
-                    void warmInitialHlsStream(masterHlsUrl, embedOrigin, false, audioPref);
+                if (videoApiRes.ok) {
+                  const rawVideoBody = await videoApiRes.text();
+                  let videoJson: {
+                    videoSource?: string;
+                    securedLink?: string;
+                    videoImage?: string;
+                  } | null = null;
+                  try {
+                    videoJson = JSON.parse(rawVideoBody);
+                  } catch {
+                    videoJson = null;
                   }
 
-                  return entry;
+                  const masterHlsUrl = (videoJson?.videoSource || videoJson?.securedLink || '').trim();
+                  if (masterHlsUrl && /^https?:\/\//i.test(masterHlsUrl)) {
+                    const proxiedMasterPath = buildHlsProxyPath(
+                      masterHlsUrl,
+                      embedOrigin,
+                      'manifest',
+                      audioPref
+                    );
+                    const playerHtml = renderDirectVideoHtml(proxiedMasterPath, subtitleTracks, null);
+                    const entry: SuperCdnResolvedEntry = {
+                      kind: 'html',
+                      available: true,
+                      resolvedChannel: 1,
+                      html: playerHtml,
+                      masterHlsUrl,
+                      embedOrigin,
+                      subtitleTracks,
+                      expiresAt: Date.now() + SUPERCDN_CACHE_TTL_MS,
+                    };
+                    superCdnStreamCache.set(cacheKey, entry);
+
+                    if (warmOnly) {
+                      await warmInitialHlsStream(masterHlsUrl, embedOrigin, true, audioPref);
+                    } else {
+                      void warmInitialHlsStream(masterHlsUrl, embedOrigin, false, audioPref);
+                    }
+
+                    return entry;
+                  }
+                  deterministicUnavailable = true;
+                  break;
+                }
+                if (vAttempt === 0 && (videoApiRes.status >= 500 || videoApiRes.status === 429)) {
+                  await new Promise((r) => setTimeout(r, 180));
+                  continue;
+                }
+                break;
+              } catch {
+                if (vAttempt === 0) {
+                  await new Promise((r) => setTimeout(r, 180));
                 }
               }
-            } catch {
-              // ignore getVideo error
             }
           }
         }
@@ -818,13 +881,16 @@ export async function resolveSuperCdnChannel(params: {
         kind: 'html',
         available: false,
         resolvedChannel: 1,
+        transientError: !deterministicUnavailable,
         html: renderStatusHtml(
           'Canal 1 indisponível para este título',
           'Selecione outro canal disponível no topo do reprodutor para iniciar a transmissão.'
         ),
-        expiresAt: Date.now() + 60 * 1000,
+        expiresAt: Date.now() + (deterministicUnavailable ? 60 * 1000 : 10 * 1000),
       };
-      superCdnStreamCache.set(cacheKey, deadVaiquecolEntry);
+      if (deterministicUnavailable) {
+        superCdnStreamCache.set(cacheKey, deadVaiquecolEntry);
+      }
       return deadVaiquecolEntry;
     }
 
@@ -906,28 +972,38 @@ export async function checkTitleChannelAvailability(params: {
   if (inflight) return inflight;
 
   const work = (async (): Promise<ChannelAvailabilityReport> => {
-    if (type === 'movie' && tmdbId) {
-      const isCinemaExclusive = await isMovieCinemaOnly(tmdbId);
-      if (isCinemaExclusive) {
-        return {
-          availableChannels: [],
-          recommendedChannel: null,
-          channels: {
-            1: false,
-            2: false,
-            3: false,
-          },
-        };
-      }
-    }
+    const cinemaCheckPromise =
+      type === 'movie' && tmdbId ? isMovieCinemaOnly(tmdbId) : Promise.resolve(false);
 
-    const providers = await resolveAllTitleProviders({
+    const providersPromise = resolveAllTitleProviders({
       type,
       imdb,
       tmdbId,
       season,
       episode,
     });
+
+    const sfPrePromise = checkSuperFlixCatalogAvailable({ type, tmdbId, imdb });
+    const sbIndexPrePromise = getStreamBetterCatalogIndex();
+    const episodeReleasedPromise =
+      type === 'tvshow' && tmdbId
+        ? verifyTmdbEpisodeAvailability(tmdbId, season, episode)
+        : Promise.resolve(true as const);
+
+    const isCinemaExclusive = await cinemaCheckPromise;
+    if (isCinemaExclusive) {
+      return {
+        availableChannels: [],
+        recommendedChannel: null,
+        channels: {
+          1: false,
+          2: false,
+          3: false,
+        },
+      };
+    }
+
+    const providers = await providersPromise;
 
     const [ch1Entry, sfStatus, sbAvailable, episodeReleased] = await Promise.all([
       providers.slot1Dublado || providers.slot1Original || providers.slot1Fallback
@@ -941,24 +1017,26 @@ export async function checkTitleChannelAvailability(params: {
             warmOnly: false,
           }).catch(() => null)
         : Promise.resolve(null),
-      providers.hasExplicitSuperFlix
-        ? Promise.resolve(true as const)
-        : checkSuperFlixCatalogAvailable({ type, tmdbId, imdb }),
+      providers.hasExplicitSuperFlix ? Promise.resolve(true as const) : sfPrePromise,
       providers.hasExplicitStreamBetter
         ? Promise.resolve(true)
-        : verifyStreamBetterExactAvailability({
-            type,
-            tmdbId,
-            season,
-            episode,
-            slot3Url: providers.slot3Url,
-          }),
-      type === 'tvshow' && tmdbId
-        ? verifyTmdbEpisodeAvailability(tmdbId, season, episode)
-        : Promise.resolve(true as const),
+        : sbIndexPrePromise.then(() =>
+            verifyStreamBetterExactAvailability({
+              type,
+              tmdbId,
+              season,
+              episode,
+              slot3Url: providers.slot3Url,
+            })
+          ),
+      episodeReleasedPromise,
     ]);
 
     const ch1Ok = Boolean(ch1Entry && ch1Entry.available);
+    const ch1HadTransientError =
+      !ch1Ok &&
+      Boolean(providers.slot1Dublado || providers.slot1Original || providers.slot1Fallback) &&
+      (ch1Entry === null || ch1Entry.transientError === true);
     const ch2Ok =
       Boolean(providers.slot2Url) &&
       (providers.hasExplicitSuperFlix || (sfStatus === true && episodeReleased !== false));
@@ -987,7 +1065,7 @@ export async function checkTitleChannelAvailability(params: {
     }
     availabilityCache.set(key, {
       report,
-      expiresAt: Date.now() + AVAILABILITY_CACHE_TTL_MS,
+      expiresAt: Date.now() + (ch1HadTransientError ? 15 * 1000 : AVAILABILITY_CACHE_TTL_MS),
     });
 
     return report;

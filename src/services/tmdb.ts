@@ -728,6 +728,7 @@ export const tmdbService = {
         const res = await fetch(url, { headers: { Accept: 'application/json' } });
         if (!res.ok) throw new Error('Availability check failed');
         const data = (await res.json()) as {
+          ok?: boolean;
           availableChannels?: Array<1 | 2 | 3>;
           recommendedChannel?: 1 | 2 | 3 | null;
         };
@@ -741,10 +742,12 @@ export const tmdbService = {
               ? data.recommendedChannel
               : availableChannels[0] ?? null,
         };
-        clientCache.set(url, {
-          data: result,
-          expiresAt: Date.now() + 5 * 60 * 1000,
-        });
+        if (data.ok !== false) {
+          clientCache.set(url, {
+            data: result,
+            expiresAt: Date.now() + 2 * 60 * 1000,
+          });
+        }
         return result;
       } catch {
         return {
